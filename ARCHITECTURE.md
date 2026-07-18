@@ -99,10 +99,10 @@ Figma 데스크톱 앱 → 우클릭 → Plugins → Development → Import plug
 $env:GEMINI_API_KEY = [System.Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
 ```
 
-## 실행
+## 실행 (단일 모드 — 원본 1장 + 시안 1장)
 
 ```powershell
-node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지PNG경로] [출력경로]
+node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지PNG경로] [출력경로] [카테고리] [프로모션뱃지PNG경로]
 ```
 
 Windows 콘솔에서 한글 경로가 깨지는 경우 `--args-file` 옵션 사용:
@@ -115,11 +115,49 @@ node vision/analyze.js --args-file "C:\경로\args.json"
   "referencePath": "C:\\...\\시안.png",
   "logoPath": "C:\\...\\요소\\로고.png",
   "liveBadgePath": "C:\\...\\요소\\LIVE 로고.png",
-  "outPath": "C:\\...\\output-spec.json"
+  "outPath": "C:\\...\\output-spec.json",
+  "category": "네이버기획전",
+  "badgePath": "C:\\...\\요소\\뱃지.png"
 }
 ```
 
 결과로 나온 `output-spec.json`을 Figma 플러그인 UI에서 "파일 불러오기"로 선택하고 "Figma에 생성" 클릭.
+
+## 실행 (배치 모드 — 원본 여러 장 + 시안 여러 장을 한 번에)
+
+원본이미지 폴더와 시안 폴더를 각각 지정하면, **파일명에 포함된 마지막 숫자**를 기준으로 같은 번호끼리
+자동으로 짝지어서 순서대로 각각 분석하고, `output-spec-1.json`, `output-spec-2.json`... 처럼 매칭된
+쌍의 개수만큼 스펙 파일을 생성한다. 로고/LIVE뱃지/프로모션뱃지/카테고리는 배치 전체에 공통 적용된다.
+
+- 매칭 규칙: `원본_1.jpg` ↔ `시안_1.png`, `원본_2.jpg` ↔ `시안_02.png` 처럼 파일명 속 숫자(마지막 숫자
+  그룹)가 같으면 매칭. 폴더 안에 번호가 없는 파일이 있거나 같은 번호가 중복되면 실행 전에 에러로 알려준다.
+- 한쪽에만 있는 번호(예: 원본은 있는데 시안이 없는 경우)는 경고만 출력하고 건너뛴다 — 매칭되는 나머지
+  쌍은 정상 처리됨.
+- Gemini API 레이트리밋(429) 이력이 있어 여러 쌍을 병렬이 아니라 순차로 처리한다. 쌍 하나가 실패해도
+  나머지 쌍 처리는 계속 진행하고, 마지막에 성공/실패 요약을 출력한다.
+
+```powershell
+node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]
+```
+
+한글 경로가 있는 경우 `--args-file`에 `originalsDir`/`referencesDir`을 넣으면 배치 모드로 자동 판단된다:
+```json
+{
+  "originalsDir": "C:\\...\\원본이미지",
+  "referencesDir": "C:\\...\\시안",
+  "logoPath": "C:\\...\\요소\\로고.png",
+  "liveBadgePath": "C:\\...\\요소\\LIVE 로고.png",
+  "outDir": "C:\\...\\output",
+  "category": "네이버기획전",
+  "badgePath": "C:\\...\\요소\\뱃지.png"
+}
+```
+```powershell
+node vision/analyze.js --args-file "C:\경로\batch-args.json"
+```
+
+생성된 `output-spec-*.json` 파일들을 Figma 플러그인 UI에서 하나씩 "파일 불러오기" → "Figma에 생성"으로
+불러온다 (여러 프레임 한 번에 생성은 아직 미지원 — 다음 단계 후보 참고).
 
 ## 트러블슈팅 로그
 
@@ -148,3 +186,7 @@ node vision/analyze.js --args-file "C:\경로\args.json"
 - Figma 플러그인과 vision/analyze.js가 아직 직접 연결되어 있지 않음 (JSON 파일/붙여넣기로 수동 전달)
 - 정사각형 외 세로형/가로형 소재 사이즈 미지원 (OUTPUT_SIZE 고정)
 - 여러 텍스트 배리에이션 배치 생성 미지원
+- 배치 모드(`--batch`)의 원본-시안 매칭은 파일명 번호 기준뿐 — 시안 속 사진과 원본 사진을 내용으로
+  비교해서 자동 매칭하는 기능은 아직 없음 (번호를 못 붙이는 경우 대비, 필요해지면 추가 검토)
+- 배치 모드는 `output-spec-N.json`을 여러 개 생성하는 것까지만 지원 — Figma 쪽에서 여러 프레임을 한 번에
+  생성하는 기능은 아직 없음 (지금은 하나씩 "파일 불러오기"로 불러와야 함)

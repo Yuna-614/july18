@@ -99,7 +99,7 @@ function applyMixedFontText(textNode, content, weight) {
     });
 }
 function createTextBackdrop(t) {
-    var _a;
+    var _a, _b, _c;
     const rect = figma.createRectangle();
     rect.name = "Text Backdrop";
     rect.resize(t.width, t.height);
@@ -108,18 +108,20 @@ function createTextBackdrop(t) {
     const backdrop = t.backdrop;
     const [r, g, b, a] = backdrop.color;
     if (backdrop.type === "gradient") {
-        // 텍스트 아래쪽에만 깔리는 옅은 그라데이션 패널 (위: 투명 -> 아래: backdrop 색상)
+        // 방향(angle)과 정지점(stops)을 시안에 맞게 커스터마이즈할 수 있음.
+        // 기본값(각도 270, stops 생략)은 예전 동작(위: 투명 -> 아래: backdrop 색상)과 동일하게 유지된다.
+        const stops = (_a = backdrop.stops) !== null && _a !== void 0 ? _a : [
+            { position: 0, alpha: 0 },
+            { position: 1, alpha: a },
+        ];
         rect.fills = [
             {
                 type: "GRADIENT_LINEAR",
-                gradientTransform: [
-                    [0, 1, 0],
-                    [-1, 0, 1],
-                ],
-                gradientStops: [
-                    { position: 0, color: { r, g, b, a: 0 } },
-                    { position: 1, color: { r, g, b, a } },
-                ],
+                gradientTransform: gradientTransformFromAngle((_b = backdrop.angle) !== null && _b !== void 0 ? _b : 270),
+                gradientStops: stops.map((s) => ({
+                    position: s.position,
+                    color: { r, g, b, a: s.alpha },
+                })),
             },
         ];
     }
@@ -129,7 +131,7 @@ function createTextBackdrop(t) {
             {
                 type: "BACKGROUND_BLUR",
                 blurType: "NORMAL",
-                radius: (_a = backdrop.blurRadius) !== null && _a !== void 0 ? _a : DEFAULT_BACKDROP_BLUR_RADIUS,
+                radius: (_c = backdrop.blurRadius) !== null && _c !== void 0 ? _c : DEFAULT_BACKDROP_BLUR_RADIUS,
                 visible: true,
             },
         ];
@@ -211,7 +213,7 @@ function placeImageAsset(frame, asset, name) {
 }
 function buildMaterial(spec) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a;
+        var _a, _b, _c, _d;
         const frame = figma.createFrame();
         frame.name = spec.frame.name || "Generated Material";
         frame.resize(spec.frame.width, spec.frame.height);
@@ -244,8 +246,9 @@ function buildMaterial(spec) {
             frame.appendChild(rect);
         }
         let inlineLiveLogo = null;
-        if (spec.liveBadge && spec.liveBadge.base64) {
-            const image = figma.createImage(base64ToUint8Array(spec.liveBadge.base64));
+        const liveLogoBase64 = (_b = (_a = spec.liveBadge) === null || _a === void 0 ? void 0 : _a.base64) !== null && _b !== void 0 ? _b : (_c = spec.liveLogoAsset) === null || _c === void 0 ? void 0 : _c.base64;
+        if (liveLogoBase64) {
+            const image = figma.createImage(base64ToUint8Array(liveLogoBase64));
             const size = yield image.getSizeAsync();
             inlineLiveLogo = { imageHash: image.hash, aspect: size.width / size.height };
         }
@@ -266,7 +269,7 @@ function buildMaterial(spec) {
             textNode.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
             if (t.align)
                 textNode.textAlignHorizontal = t.align;
-            for (const h of (_a = t.highlights) !== null && _a !== void 0 ? _a : []) {
+            for (const h of (_d = t.highlights) !== null && _d !== void 0 ? _d : []) {
                 const start = t.content.indexOf(h.text);
                 if (start === -1)
                     continue;
@@ -279,6 +282,7 @@ function buildMaterial(spec) {
         }
         placeImageAsset(frame, spec.logo, "Logo");
         placeImageAsset(frame, spec.liveBadge, "Live Badge");
+        placeImageAsset(frame, spec.badge, "Promo Badge");
         figma.currentPage.appendChild(frame);
         figma.viewport.scrollAndZoomIntoView([frame]);
         figma.currentPage.selection = [frame];

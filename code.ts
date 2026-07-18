@@ -4,10 +4,18 @@ declare function atob(data: string): string;
 
 figma.showUI(__html__, { width: 420, height: 560 });
 
+interface GradientStopSpec {
+  position: number; // 0~1
+  alpha: number; // 0~1
+}
+
 interface TextBackdropSpec {
   type: "gradient" | "blur";
   color: [number, number, number, number];
   blurRadius?: number;
+  // gradient 타입 전용. 생략하면 기존 기본값(270도, 0%투명→100%불투명) 사용
+  angle?: number; // 도(degree), 0~360
+  stops?: [GradientStopSpec, GradientStopSpec]; // 생략 시 기본값 [{position:0,alpha:0},{position:1,alpha:color[3]}]
 }
 
 interface TextHighlightSpec {
@@ -64,6 +72,11 @@ interface MaterialSpec {
   texts: TextSpec[];
   logo?: LogoSpec;
   liveBadge?: LogoSpec;
+  // texts 안에 "LIVE" 글자가 인라인으로 들어간 경우(별도 뱃지 위치 없음) 치환용 에셋만 전달됨.
+  // liveBadge가 별도 뱃지로 이미 있으면 그 base64를 재사용하므로, 이 필드는 liveBadge가 없을 때만 채워진다.
+  liveLogoAsset?: { base64: string };
+  // 캡슐형(pill) 프로모션 뱃지 — 로고/LIVE 뱃지와 동일하게 이미 텍스트가 포함된 완성본 PNG를 그대로 배치만 함
+  badge?: LogoSpec;
 }
 
 // ============================================================
@@ -169,18 +182,20 @@ function createTextBackdrop(t: TextSpec): RectangleNode {
   const [r, g, b, a] = backdrop.color;
 
   if (backdrop.type === "gradient") {
-    // 텍스트 아래쪽에만 깔리는 옅은 그라데이션 패널 (위: 투명 -> 아래: backdrop 색상)
+    // 방향(angle)과 정지점(stops)을 시안에 맞게 커스터마이즈할 수 있음.
+    // 기본값(각도 270, stops 생략)은 예전 동작(위: 투명 -> 아래: backdrop 색상)과 동일하게 유지된다.
+    const stops = backdrop.stops ?? [
+      { position: 0, alpha: 0 },
+      { position: 1, alpha: a },
+    ];
     rect.fills = [
       {
         type: "GRADIENT_LINEAR",
-        gradientTransform: [
-          [0, 1, 0],
-          [-1, 0, 1],
-        ],
-        gradientStops: [
-          { position: 0, color: { r, g, b, a: 0 } },
-          { position: 1, color: { r, g, b, a } },
-        ],
+        gradientTransform: gradientTransformFromAngle(backdrop.angle ?? 270),
+        gradientStops: stops.map((s) => ({
+          position: s.position,
+          color: { r, g, b, a: s.alpha },
+        })),
       },
     ];
   } else {
@@ -312,8 +327,9 @@ async function buildMaterial(spec: MaterialSpec): Promise<FrameNode> {
   }
 
   let inlineLiveLogo: InlineLiveLogo | null = null;
-  if (spec.liveBadge && spec.liveBadge.base64) {
-    const image = figma.createImage(base64ToUint8Array(spec.liveBadge.base64));
+  const liveLogoBase64 = spec.liveBadge?.base64 ?? spec.liveLogoAsset?.base64;
+  if (liveLogoBase64) {
+    const image = figma.createImage(base64ToUint8Array(liveLogoBase64));
     const size = await image.getSizeAsync();
     inlineLiveLogo = { imageHash: image.hash, aspect: size.width / size.height };
   }
@@ -351,6 +367,7 @@ async function buildMaterial(spec: MaterialSpec): Promise<FrameNode> {
 
   placeImageAsset(frame, spec.logo, "Logo");
   placeImageAsset(frame, spec.liveBadge, "Live Badge");
+  placeImageAsset(frame, spec.badge, "Promo Badge");
 
   figma.currentPage.appendChild(frame);
   figma.viewport.scrollAndZoomIntoView([frame]);
