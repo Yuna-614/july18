@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
+const AdmZip = require("adm-zip");
 const { OUTPUT_SIZE, getProductionRules } = require("./rules");
 
 const MODEL = "gemini-3.5-flash";
@@ -432,6 +433,212 @@ async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, 
   }
 }
 
+// 시안 판별/원본 매칭용으로 보낼 때는 원본 그대로 보낼 필요가 없다 — 리사이즈해서 토큰/속도를 아낀다.
+const MATCH_THUMBNAIL_MAX_SIZE = 768;
+
+async function loadThumbnailPart(filePath) {
+  const resolvedPath = resolveActualPath(filePath);
+  const rawBuffer = fs.readFileSync(resolvedPath);
+  const buffer = await sharp(rawBuffer)
+    .rotate()
+    .resize(MATCH_THUMBNAIL_MAX_SIZE, MATCH_THUMBNAIL_MAX_SIZE, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 80 })
+    .toBuffer();
+  return { base64: buffer.toString("base64"), mimeType: "image/jpeg" };
+}
+
+function requireApiKey() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.");
+  }
+  return apiKey;
+}
+
+const SIAN_CLASSIFICATION_SCHEMA = {
+  type: "object",
+  properties: {
+    sianIndices: {
+      type: "array",
+      items: { type: "integer" },
+      description:
+        "완성된 광고 시안(문구/로고가 이미지 위에 합성되어 있는, 광고주에게 전달할 최종 디자인 목업)으로 보이는 이미지의 인덱스 목록. " +
+        "텍스트나 로고 없이 제품·인테리어만 찍힌 순수 사진, 로고 단독 이미지, 작은 아이콘 등은 제외.",
+    },
+  },
+  required: ["sianIndices"],
+};
+
+// PPT 등에서 추출한 이미지 후보들 중 "완성된 광고 시안"으로 보이는 것만 골라 인덱스로 반환한다.
+async function classifySianImages(candidatePaths) {
+  const apiKey = requireApiKey();
+  const { GoogleGenAI } = await import("@google/genai");
+  const ai = new GoogleGenAI({ apiKey });
+
+  const contents = [`아래는 문서에서 추출한 이미지 ${candidatePaths.length}장이다. 각 이미지 앞에 인덱스를 표시했다.`];
+  for (let i = 0; i < candidatePaths.length; i++) {
+    const thumb = await loadThumbnailPart(candidatePaths[i]);
+    contents.push(`[인덱스 ${i}] ${path.basename(candidatePaths[i])}`);
+    contents.push({ inlineData: { mimeType: thumb.mimeType, data: thumb.base64 } });
+  }
+  contents.push(
+    "이 중에서 완성된 광고 시안(문구/로고가 이미지 위에 합성되어 있는, 광고주에게 전달할 최종 디자인 목업)으로 보이는 " +
+      "이미지의 인덱스만 골라라. 텍스트/로고 없이 제품이나 인테리어만 찍힌 순수 사진, 로고 단독 이미지, 작은 아이콘 등은 제외할 것.",
+  );
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents,
+    config: { responseMimeType: "application/json", responseSchema: SIAN_CLASSIFICATION_SCHEMA, maxOutputTokens: 2048 },
+  });
+  const parsed = JSON.parse(response.text);
+  const indices = Array.isArray(parsed.sianIndices) ? parsed.sianIndices : [];
+  return indices.filter((i) => Number.isInteger(i) && i >= 0 && i < candidatePaths.length);
+}
+
+const MATCH_SCHEMA = {
+  type: "object",
+  properties: {
+    matchedIndex: {
+      type: "integer",
+      description: "시안 속 제품/장면과 같은 원본 사진의 인덱스. 확실히 일치하는 원본이 없으면 -1.",
+    },
+  },
+  required: ["matchedIndex"],
+};
+
+// 시안 1장과 원본이미지 폴더 후보 전체를 한 번에 보여주고, 같은 제품/장면인 원본의 경로를 찾아 반환한다.
+// 확실히 일치하는 게 없으면 null.
+async function matchOriginalForSian(sianPath, originalCandidatePaths) {
+  const apiKey = requireApiKey();
+  const { GoogleGenAI } = await import("@google/genai");
+  const ai = new GoogleGenAI({ apiKey });
+
+  const sianThumb = await loadThumbnailPart(sianPath);
+  const contents = [
+    "[시안] 아래는 완성된 광고 시안 이미지다.",
+    { inlineData: { mimeType: sianThumb.mimeType, data: sianThumb.base64 } },
+    `[원본 후보 목록] 아래는 원본이미지 폴더에 있는 고해상도 사진 후보 ${originalCandidatePaths.length}장이다. 각 이미지 앞에 인덱스를 표시했다.`,
+  ];
+  for (let i = 0; i < originalCandidatePaths.length; i++) {
+    const thumb = await loadThumbnailPart(originalCandidatePaths[i]);
+    contents.push(`[인덱스 ${i}] ${path.basename(originalCandidatePaths[i])}`);
+    contents.push({ inlineData: { mimeType: thumb.mimeType, data: thumb.base64 } });
+  }
+  contents.push(
+    "시안 속에 등장하는 제품(소파/의자 등)과 배경(공간, 구도)이 같은 원본 사진을 후보 목록에서 골라 인덱스로 답하라. " +
+      "확실히 일치하는 원본이 없으면 -1을 반환할 것 (색상만 비슷하거나 다른 제품/공간이면 매칭하지 말 것).",
+  );
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents,
+    config: { responseMimeType: "application/json", responseSchema: MATCH_SCHEMA, maxOutputTokens: 1024 },
+  });
+  const parsed = JSON.parse(response.text);
+  const idx = parsed.matchedIndex;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= originalCandidatePaths.length) return null;
+  return originalCandidatePaths[idx];
+}
+
+// PPT(pptx)는 zip 컨테이너이므로 ppt/media/ 안의 이미지 파일들을 그대로 꺼낸다.
+// 슬라이드에 있는 그림을 "렌더링"하는 게 아니라 원본 임베디드 이미지 파일을 그대로 추출하는 방식이라,
+// 텍스트가 네이티브 PPT 도형/글상자로만 있고 사진과 합성되어 있지 않은 슬라이드는 지원하지 않는다
+// (지금까지 확인한 기획안 PPT들은 완성된 시안을 통째로 이미지 한 장에 붙여넣는 방식이라 이 방식으로 충분함).
+async function extractPptImages(pptxPath) {
+  const zip = new AdmZip(pptxPath);
+  const entries = zip.getEntries().filter((e) => /^ppt\/media\/.+\.(png|jpe?g|webp)$/i.test(e.entryName));
+  if (entries.length === 0) {
+    throw new Error("PPT 안(ppt/media/)에서 이미지를 찾지 못했습니다.");
+  }
+
+  const baseName = path.basename(pptxPath, path.extname(pptxPath));
+  const extractDir = path.join(path.dirname(pptxPath), `.${baseName}-추출이미지`);
+  fs.mkdirSync(extractDir, { recursive: true });
+
+  const extractedPaths = [];
+  for (const entry of entries) {
+    const outPath = path.join(extractDir, path.basename(entry.entryName));
+    fs.writeFileSync(outPath, entry.getData());
+    extractedPaths.push(outPath);
+  }
+  return extractedPaths;
+}
+
+// 시안 입력을 이미지 파일 하나가 아니라 PPT나 이미지 파일 경로로 받아서, 그 안에서 시안을 찾아내고
+// (PPT면 이미지 추출 후 어떤 게 완성된 시안인지 AI로 판별) 원본이미지 폴더 전체와 비교해서 내용으로
+// 자동 매칭한 뒤, 매칭된 쌍마다 순서대로 소재를 만든다. 파일명 번호가 필요 없는 대신 AI 판단에 의존하므로
+// 결과(어떤 원본이 매칭됐는지)를 콘솔에 남겨 검증할 수 있게 한다.
+async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir }) {
+  const resolvedInput = resolveActualPath(inputPath);
+  const ext = path.extname(resolvedInput).toLowerCase();
+
+  let sianCandidatePaths;
+  if (ext === ".pptx" || ext === ".ppt") {
+    console.log("PPT에서 이미지 추출 중...");
+    const extractedPaths = await extractPptImages(resolvedInput);
+    console.log(`추출된 이미지 ${extractedPaths.length}장 중 시안 판별 중...`);
+    const sianIndices = await classifySianImages(extractedPaths);
+    if (sianIndices.length === 0) {
+      throw new Error("PPT 안에서 완성된 시안으로 보이는 이미지를 찾지 못했습니다.");
+    }
+    sianCandidatePaths = sianIndices.map((i) => extractedPaths[i]);
+    console.log(`시안으로 판별된 이미지 ${sianCandidatePaths.length}장: ${sianCandidatePaths.map((p) => path.basename(p)).join(", ")}`);
+  } else if (IMAGE_EXTENSIONS.has(ext)) {
+    sianCandidatePaths = [resolvedInput];
+  } else {
+    throw new Error(`지원하지 않는 입력 파일 형식입니다: "${ext}" (이미지 파일 또는 .pptx만 가능)`);
+  }
+
+  const originalCandidatePaths = listImageFiles(originalsDir);
+  if (originalCandidatePaths.length === 0) {
+    throw new Error(`원본이미지 폴더에 이미지가 없습니다: ${originalsDir}`);
+  }
+
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const succeeded = [];
+  const failed = [];
+  for (let i = 0; i < sianCandidatePaths.length; i++) {
+    const sianPath = sianCandidatePaths[i];
+    console.log(`[${i + 1}/${sianCandidatePaths.length}] "${path.basename(sianPath)}"에 맞는 원본 찾는 중...`);
+    try {
+      const matchedOriginal = await matchOriginalForSian(sianPath, originalCandidatePaths);
+      if (!matchedOriginal) {
+        console.error(`  -> 건너뜀: 일치하는 원본을 찾지 못함`);
+        failed.push({ sianPath, message: "매칭되는 원본 없음" });
+        continue;
+      }
+      console.log(`  -> 매칭: ${path.basename(matchedOriginal)}, 소재 제작 중...`);
+      const spec = await buildMaterialSpec(
+        matchedOriginal,
+        sianPath,
+        logoPath,
+        liveBadgePath,
+        `${i + 1}. ${path.basename(matchedOriginal, path.extname(matchedOriginal))}`,
+        category,
+        badgePath,
+      );
+      const outPath = path.join(outDir, `output-spec-${i + 1}.json`);
+      fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
+      succeeded.push({ sianPath, matchedOriginal, outPath });
+      console.log(`  -> 완료: ${outPath}`);
+    } catch (err) {
+      failed.push({ sianPath, message: err.message });
+      console.error(`  -> 실패: ${err.message}`);
+    }
+  }
+
+  console.log(`\n매칭 배치 완료: 성공 ${succeeded.length}건, 실패 ${failed.length}건`);
+  if (succeeded.length > 0) {
+    console.log("매칭 결과 (AI 자동 판단이므로 꼭 확인할 것):");
+    for (const s of succeeded) console.log(`  - ${path.basename(s.sianPath)}  <-  ${path.basename(s.matchedOriginal)}`);
+  }
+  if (failed.length > 0) {
+    console.log(`실패/미매칭: ${failed.map((f) => path.basename(f.sianPath)).join(", ")} (위 로그에서 원인 확인)`);
+  }
+}
+
 async function main() {
   // Windows 콘솔에서 한글 경로를 커맨드라인 인자로 넘기면 인코딩이 깨지는 경우가 있어,
   // --args-file <json경로> 로 UTF-8 JSON 파일을 통해 경로를 전달하는 방식도 지원한다.
@@ -442,7 +649,14 @@ async function main() {
     const argsFileText = fs.readFileSync(argsFilePath, "utf-8").replace(/^﻿/, "");
     const parsed = JSON.parse(argsFileText);
 
-    // originalsDir/referencesDir이 있으면 배치 모드로 판단, 없으면 기존 단일 모드로 처리
+    // inputPath(+originalsDir)가 있으면 AI 자동 매칭 모드, originalsDir/referencesDir이 있으면
+    // 파일명 번호 배치 모드, 그 외에는 기존 단일 모드로 처리
+    if (parsed.inputPath && parsed.originalsDir) {
+      const outDir = parsed.outDir || path.join(__dirname, "output");
+      await runMatchMode({ ...parsed, outDir });
+      return;
+    }
+
     if (parsed.originalsDir && parsed.referencesDir) {
       const outDir = parsed.outDir || path.join(__dirname, "output");
       await runBatch({ ...parsed, outDir });
@@ -463,6 +677,23 @@ async function main() {
       category: parsed.category,
       badgePath: parsed.badgePath,
     });
+    return;
+  }
+
+  if (process.argv[2] === "--match") {
+    const [inputPath, originalsDir, logoPath, liveBadgePath, outDirArg, category, badgePath] = process.argv.slice(3);
+    if (!inputPath || !originalsDir) {
+      console.error(
+        "사용법: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
+          "     또는: node vision/analyze.js --args-file <json경로> (JSON에 inputPath/originalsDir 지정)\n" +
+          "시안이 이미지 파일이면 그 자체를, .pptx면 안의 이미지를 추출해 AI로 시안을 골라낸 뒤, 원본이미지 폴더 전체와 " +
+          "내용을 비교해 자동으로 매칭합니다 (파일명 번호 불필요, AI 판단이므로 결과를 콘솔에서 꼭 확인할 것)",
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const outDir = outDirArg || path.join(__dirname, "output");
+    await runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir });
     return;
   }
 
@@ -489,6 +720,7 @@ async function main() {
       "사용법: node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지PNG경로] [출력경로] [카테고리] [프로모션뱃지PNG경로]\n" +
         "     또는: node vision/analyze.js --args-file <json경로>\n" +
         "     또는: node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
+        "     또는: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
         "카테고리(선택): 네이버기획전 | 29cm기획전 | 제품인지 | 별도기획전 (생략 시 공통 규칙만 적용)",
     );
     process.exitCode = 1;
