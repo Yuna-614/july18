@@ -1,9 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
+const { OUTPUT_SIZE, PRODUCTION_RULES } = require("./rules");
 
 const MODEL = "gemini-3.5-flash";
-const OUTPUT_SIZE = 1080; // 알로소 기본 소재 사이즈
 
 // Windows NTFS는 파일명을 정규화하지 않고 그대로 저장하는데, 한글 파일명이 NFD(자모 분리형)로
 // 저장된 경우 우리가 전달받은 NFC(완성형) 경로와 바이트 단위로 일치하지 않아 ENOENT가 난다.
@@ -126,45 +126,6 @@ const MATERIAL_SPEC_SCHEMA = {
   },
   required: ["cropRect", "texts"],
 };
-
-const PRODUCTION_RULES = `
-알로소(Alloso) 소재 제작 규칙:
-
-[기본 사이즈]
-- 모든 소재의 기본 출력 사이즈는 ${OUTPUT_SIZE}x${OUTPUT_SIZE}px (정사각형)
-
-[폰트]
-- 국문은 Pretendard, 영문/숫자는 Century Gothic으로 자동 분기되므로 fontWeight만 판단하면 됨(폰트 패밀리는 렌더링 단계에서 문자 단위로 자동 처리)
-- 메인 타이틀은 bold, 서브 텍스트는 regular로 판단. 얇은(regular) 텍스트는 시안에서도 가늘고 심플한 인상이어야 함
-
-[텍스트]
-- 메인 타이틀 fontSize는 68px 이내 권장(고정값 아님, 시안 비율 보고 판단)
-- 서브타이틀 fontSize는 메인 타이틀의 약 60%
-- align은 시안에 보이는 정렬(좌/중앙/우)을 그대로 따를 것
-- 문장 중간에 "LIVE" 단어가 보이면 content에 "LIVE"라는 글자를 그대로 포함해서 적을 것 (렌더링 시 자동으로 로고 이미지로 치환됨, highlights로 색만 바꾸지 말 것)
-- "LIVE" 외에 특정 단어만 다른 색으로 강조되어 있으면 그 단어와 색을 highlights에 기재
-
-[이미지 크롭]
-- 시안 이미지는 이미 완성된 레이아웃 레퍼런스이고, 원본 이미지는 크롭되지 않은 고해상도 사진이다
-- 원본 이미지에서, 시안과 동일한 구도(제품이 보이는 각도/비율/여백)를 재현하는 정사각형 영역을 cropRect로 산출할 것
-- 원본 이미지가 시안보다 훨씬 넓은 화각을 담고 있을 수 있으므로, 시안 속 피사체(소파/의자 등)와 동일한 피사체를 원본에서 찾아 정렬 기준으로 삼을 것
-
-[로고]
-- 로고는 별도 PNG 파일을 그대로 사용하므로, logoPlacement에는 로고가 들어갈 위치/크기만 기재한다 (로고 이미지 자체를 만들거나 크롭하지 않음)
-
-[LIVE 뱃지]
-- 빨간 사각형 배경에 흰색 "LIVE" 글자가 있는 뱃지는 별도 SVG 파일을 그대로 사용하므로, liveBadgePlacement에는 위치/크기만 기재한다 (텍스트나 배경을 직접 만들지 않음)
-- 시안에 LIVE 뱃지가 없으면 liveBadgePlacement는 생략
-
-[가독성 처리 - backdrop]
-- 텍스트가 배경 이미지 위에 있어 가독성이 떨어질 것으로 보이면 backdrop 필드를 채울 것
-- 배경 이미지가 어둡거나 복잡한 영역 위의 텍스트: type "gradient" (텍스트 아래쪽에 옅게 깔리는 그라데이션 패널) 또는 "blur" (블러 처리된 패널) 중 시안에 더 가까운 방식으로 판단
-- backdrop.color는 반드시 그 텍스트 주변 배경 이미지의 어두운 영역 색상에서 추출한 값을 사용 (임의의 검정색 사용 금지)
-- 텍스트가 이미 단색/그라데이션 배경 위에 있어 가독성 문제가 없으면 backdrop 생략
-
-[톤앤무드]
-- 깔끔하고 절제된 톤, 텍스트+이미지 위주 구성, 그리드형 정렬 선호, 과한 장식 지양 — 이 톤에서 벗어나는 과도한 크기/색상 판단은 피할 것
-`;
 
 function detectMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();

@@ -66,18 +66,34 @@ interface MaterialSpec {
   liveBadge?: LogoSpec;
 }
 
+// ============================================================
+// 소재 제작 규칙 (알로소 Alloso) — 이 블록만 브랜드 규칙이다.
+// Figma 플러그인은 번들러 없이 단일 code.ts를 tsc로만 컴파일하기 때문에
+// vision/rules.js처럼 별도 파일로 분리할 수 없어, 이 블록 안에 명확히 모아뒀다.
+// 아래 이 블록을 벗어난 부분은 전부 "작동" 로직(엔진)이므로 규칙 수정 시 건드릴 필요 없다.
+// ============================================================
 const FONT_WEIGHT_MAP: Record<TextSpec["fontWeight"], string> = {
   regular: "Regular",
   medium: "Medium",
   bold: "Bold",
 };
 
-// 알로소 제작 규칙: 국문+숫자는 Pretendard, 영문만 Century Gothic, 자간은 각각 -1.5% / -2.5%
+// 국문+숫자는 Pretendard, 영문만 Century Gothic
 const KR_FAMILY = "Pretendard";
 const LATIN_FAMILY = "Century Gothic";
+// 자간(letter spacing), %
 const KR_LETTER_SPACING_PERCENT = -1.5;
 const LATIN_LETTER_SPACING_PERCENT = -2.5;
+// 브랜드 폰트 로드 실패 시 대체 폰트
 const FALLBACK_FONT: FontName = { family: "Inter", style: "Regular" };
+// 텍스트 내 "LIVE" 인라인 로고 치환 시 로고 높이 = fontSize * 이 배율, 로고-텍스트 간 여백 = fontSize * 이 배율
+const LIVE_INLINE_LOGO_HEIGHT_RATIO = 1.05;
+const LIVE_INLINE_LOGO_GAP_RATIO = 0.15;
+// backdrop(가독성 패널) blur 타입의 기본 블러 강도(px)
+const DEFAULT_BACKDROP_BLUR_RADIUS = 20;
+// ============================================================
+// 규칙 블록 끝
+// ============================================================
 
 const isLatinChar = (ch: string) => /[A-Za-z]/.test(ch);
 
@@ -173,7 +189,7 @@ function createTextBackdrop(t: TextSpec): RectangleNode {
       {
         type: "BACKGROUND_BLUR",
         blurType: "NORMAL",
-        radius: backdrop.blurRadius ?? 20,
+        radius: backdrop.blurRadius ?? DEFAULT_BACKDROP_BLUR_RADIUS,
         visible: true,
       } as Effect,
     ];
@@ -192,8 +208,8 @@ interface InlineLiveLogo {
 // 그 폭을 이어붙여 원래 정렬(align)에 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다.
 async function renderTextWithInlineLiveLogo(frame: FrameNode, t: TextSpec, logo: InlineLiveLogo): Promise<void> {
   const parts = t.content.split("LIVE");
-  const gap = t.fontSize * 0.15;
-  const logoHeight = t.fontSize * 1.05;
+  const gap = t.fontSize * LIVE_INLINE_LOGO_GAP_RATIO;
+  const logoHeight = t.fontSize * LIVE_INLINE_LOGO_HEIGHT_RATIO;
   const logoWidth = logoHeight * logo.aspect;
 
   const segments: (TextNode | null)[] = [];
