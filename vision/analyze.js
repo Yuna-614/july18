@@ -78,6 +78,25 @@ const MATERIAL_SPEC_SCHEMA = {
             },
             required: ["type", "color"],
           },
+          highlights: {
+            type: "array",
+            description:
+              "content 안에서 일부 단어만 다른 색으로 강조해야 하면 그 단어와 색을 기재. 'LIVE'는 렌더링 단계에서 항상 로고 이미지로 자동 치환되므로 여기 포함하지 말 것. 강조할 부분이 없으면 생략",
+            items: {
+              type: "object",
+              properties: {
+                text: { type: "string", description: "content 안에 정확히 포함된 부분 문자열" },
+                color: {
+                  type: "array",
+                  items: { type: "number" },
+                  minItems: 3,
+                  maxItems: 3,
+                  description: "0~1 사이 실수 RGB",
+                },
+              },
+              required: ["text", "color"],
+            },
+          },
         },
         required: ["content", "x", "y", "width", "height", "fontSize", "fontWeight", "color"],
       },
@@ -85,6 +104,17 @@ const MATERIAL_SPEC_SCHEMA = {
     logoPlacement: {
       type: "object",
       description: `브랜드 로고가 배치되어야 할 위치와 크기. ${OUTPUT_SIZE}x${OUTPUT_SIZE} 출력 캔버스 기준 픽셀 좌표`,
+      properties: {
+        x: { type: "integer" },
+        y: { type: "integer" },
+        width: { type: "integer" },
+        height: { type: "integer" },
+      },
+      required: ["x", "y", "width", "height"],
+    },
+    liveBadgePlacement: {
+      type: "object",
+      description: `LIVE 뱃지(빨간 사각형 + LIVE 텍스트)가 시안에 보이면, 그 위치와 크기. ${OUTPUT_SIZE}x${OUTPUT_SIZE} 출력 캔버스 기준 픽셀 좌표. 안 보이면 생략`,
       properties: {
         x: { type: "integer" },
         y: { type: "integer" },
@@ -111,6 +141,8 @@ const PRODUCTION_RULES = `
 - 메인 타이틀 fontSize는 68px 이내 권장(고정값 아님, 시안 비율 보고 판단)
 - 서브타이틀 fontSize는 메인 타이틀의 약 60%
 - align은 시안에 보이는 정렬(좌/중앙/우)을 그대로 따를 것
+- 문장 중간에 "LIVE" 단어가 보이면 content에 "LIVE"라는 글자를 그대로 포함해서 적을 것 (렌더링 시 자동으로 로고 이미지로 치환됨, highlights로 색만 바꾸지 말 것)
+- "LIVE" 외에 특정 단어만 다른 색으로 강조되어 있으면 그 단어와 색을 highlights에 기재
 
 [이미지 크롭]
 - 시안 이미지는 이미 완성된 레이아웃 레퍼런스이고, 원본 이미지는 크롭되지 않은 고해상도 사진이다
@@ -119,6 +151,10 @@ const PRODUCTION_RULES = `
 
 [로고]
 - 로고는 별도 PNG 파일을 그대로 사용하므로, logoPlacement에는 로고가 들어갈 위치/크기만 기재한다 (로고 이미지 자체를 만들거나 크롭하지 않음)
+
+[LIVE 뱃지]
+- 빨간 사각형 배경에 흰색 "LIVE" 글자가 있는 뱃지는 별도 SVG 파일을 그대로 사용하므로, liveBadgePlacement에는 위치/크기만 기재한다 (텍스트나 배경을 직접 만들지 않음)
+- 시안에 LIVE 뱃지가 없으면 liveBadgePlacement는 생략
 
 [가독성 처리 - backdrop]
 - 텍스트가 배경 이미지 위에 있어 가독성이 떨어질 것으로 보이면 backdrop 필드를 채울 것
@@ -231,7 +267,7 @@ async function cropAndResizeOriginal(original, cropRect) {
   return buffer.toString("base64");
 }
 
-async function buildMaterialSpec(originalPath, referencePath, logoPath, frameName) {
+async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, frameName) {
   const { spec, original } = await analyze(originalPath, referencePath);
 
   const croppedBase64 = await cropAndResizeOriginal(original, spec.cropRect);
@@ -249,11 +285,18 @@ async function buildMaterialSpec(originalPath, referencePath, logoPath, frameNam
     result.logo = { ...spec.logoPlacement };
   }
 
+  if (spec.liveBadgePlacement && liveBadgePath) {
+    const liveBadgeBase64 = fs.readFileSync(resolveActualPath(liveBadgePath)).toString("base64");
+    result.liveBadge = { ...spec.liveBadgePlacement, base64: liveBadgeBase64 };
+  } else if (spec.liveBadgePlacement) {
+    result.liveBadge = { ...spec.liveBadgePlacement };
+  }
+
   return result;
 }
 
 async function main() {
-  let originalPath, referencePath, logoPath, outPathArg;
+  let originalPath, referencePath, logoPath, liveBadgePath, outPathArg;
 
   // Windows 콘솔에서 한글 경로를 커맨드라인 인자로 넘기면 인코딩이 깨지는 경우가 있어,
   // --args-file <json경로> 로 UTF-8 JSON 파일을 통해 경로를 전달하는 방식도 지원한다.
@@ -263,14 +306,15 @@ async function main() {
     originalPath = parsed.originalPath;
     referencePath = parsed.referencePath;
     logoPath = parsed.logoPath;
+    liveBadgePath = parsed.liveBadgePath;
     outPathArg = parsed.outPath;
   } else {
-    [originalPath, referencePath, logoPath, outPathArg] = process.argv.slice(2);
+    [originalPath, referencePath, logoPath, liveBadgePath, outPathArg] = process.argv.slice(2);
   }
 
   if (!originalPath || !referencePath) {
     console.error(
-      "사용법: node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [출력경로]\n" +
+      "사용법: node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지SVG경로] [출력경로]\n" +
         "     또는: node vision/analyze.js --args-file <json경로>",
     );
     process.exitCode = 1;
@@ -278,7 +322,7 @@ async function main() {
   }
   const outPath = outPathArg || path.join(__dirname, "output-spec.json");
 
-  const spec = await buildMaterialSpec(originalPath, referencePath, logoPath);
+  const spec = await buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath);
   fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
   console.log(`스펙 생성 완료: ${outPath}`);
 }
