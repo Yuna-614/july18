@@ -138,59 +138,67 @@ function createTextBackdrop(t) {
     }
     return rect;
 }
-// content 안의 "LIVE" 문자열을 모두 실제 로고 이미지로 치환해서 배치한다.
-// 텍스트를 "LIVE" 기준으로 나눠 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고,
-// 그 폭을 이어붙여 원래 정렬(align)에 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다.
+// content 안의 "LIVE" 문자열을 모두 실제 로고 이미지로 치환해서 배치한다. content가 여러 줄("\n" 포함)일
+// 수 있으므로 줄 단위로 나눠서 처리한다 — "LIVE"가 없는 줄은 그대로 한 줄 텍스트로, 있는 줄만 "LIVE" 기준으로
+// 쪼개 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고, 그 폭을 이어붙여 정렬(align)에
+// 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다. 다음 줄의 y좌표는 이전 줄에서 측정된 실제 높이만큼 내려간다.
 function renderTextWithInlineLiveLogo(frame, t, logo) {
     return __awaiter(this, void 0, void 0, function* () {
-        const parts = t.content.split("LIVE");
         const gap = t.fontSize * LIVE_INLINE_LOGO_GAP_RATIO;
         const logoHeight = t.fontSize * LIVE_INLINE_LOGO_HEIGHT_RATIO;
         const logoWidth = logoHeight * logo.aspect;
-        const segments = [];
-        for (const part of parts) {
-            if (!part) {
-                segments.push(null);
-                continue;
+        let cursorY = t.y;
+        for (const line of t.content.split("\n")) {
+            const parts = line.includes("LIVE") ? line.split("LIVE") : [line];
+            const segments = [];
+            for (const part of parts) {
+                if (!part) {
+                    segments.push(null);
+                    continue;
+                }
+                const node = figma.createText();
+                yield applyMixedFontText(node, part, t.fontWeight);
+                node.fontSize = t.fontSize;
+                node.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
+                node.textAutoResize = "WIDTH_AND_HEIGHT"; // 실제 렌더링 폭/높이를 읽기 위해 콘텐츠에 맞춰 크기 측정
+                segments.push(node);
             }
-            const node = figma.createText();
-            yield applyMixedFontText(node, part, t.fontWeight);
-            node.fontSize = t.fontSize;
-            node.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
-            node.textAutoResize = "WIDTH_AND_HEIGHT"; // 실제 렌더링 폭을 읽기 위해 콘텐츠에 맞춰 크기 측정
-            segments.push(node);
-        }
-        let totalWidth = 0;
-        segments.forEach((node, i) => {
-            if (node)
-                totalWidth += node.width;
-            if (i < segments.length - 1)
-                totalWidth += gap + logoWidth + gap;
-        });
-        let cursorX = t.x;
-        if (t.align === "RIGHT")
-            cursorX = t.x + t.width - totalWidth;
-        else if (t.align === "CENTER")
-            cursorX = t.x + (t.width - totalWidth) / 2;
-        for (let i = 0; i < segments.length; i++) {
-            const node = segments[i];
-            if (node) {
-                node.x = cursorX;
-                node.y = t.y;
-                frame.appendChild(node);
-                cursorX += node.width;
+            let totalWidth = 0;
+            let lineHeight = t.fontSize * 1.3; // 세그먼트가 전부 빈 값일 때(빈 줄)를 대비한 기본값
+            segments.forEach((node, i) => {
+                if (node) {
+                    totalWidth += node.width;
+                    lineHeight = Math.max(lineHeight, node.height);
+                }
+                if (i < segments.length - 1)
+                    totalWidth += gap + logoWidth + gap;
+            });
+            let cursorX = t.x;
+            if (t.align === "RIGHT")
+                cursorX = t.x + t.width - totalWidth;
+            else if (t.align === "CENTER")
+                cursorX = t.x + (t.width - totalWidth) / 2;
+            for (let i = 0; i < segments.length; i++) {
+                const node = segments[i];
+                if (node) {
+                    node.x = cursorX;
+                    node.y = cursorY;
+                    frame.appendChild(node);
+                    cursorX += node.width;
+                }
+                if (i < segments.length - 1) {
+                    cursorX += gap;
+                    const rect = figma.createRectangle();
+                    rect.name = "Live Inline Logo";
+                    rect.resize(logoWidth, logoHeight);
+                    rect.x = cursorX;
+                    rect.y = cursorY + (t.fontSize - logoHeight) / 2;
+                    rect.fills = [{ type: "IMAGE", imageHash: logo.imageHash, scaleMode: "FIT" }];
+                    frame.appendChild(rect);
+                    cursorX += logoWidth + gap;
+                }
             }
-            if (i < segments.length - 1) {
-                cursorX += gap;
-                const rect = figma.createRectangle();
-                rect.name = "Live Inline Logo";
-                rect.resize(logoWidth, logoHeight);
-                rect.x = cursorX;
-                rect.y = t.y + (t.fontSize - logoHeight) / 2;
-                rect.fills = [{ type: "IMAGE", imageHash: logo.imageHash, scaleMode: "FIT" }];
-                frame.appendChild(rect);
-                cursorX += logoWidth + gap;
-            }
+            cursorY += lineHeight;
         }
     });
 }

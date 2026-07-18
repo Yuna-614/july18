@@ -248,6 +248,12 @@ function normalizeSpecColors(spec) {
   }
 }
 
+// 두 사각형(x,y,width,height)이 겹치는지 확인. 모델이 같은 LIVE 요소를 인라인 텍스트와 별도
+// liveBadgePlacement로 중복 반환했는지 판단하는 데 쓴다(겹치면 중복, 안 겹치면 서로 다른 인스턴스).
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
 function clampCropRect(rect, imageWidth, imageHeight) {
   const size = Math.max(1, Math.min(rect.width, rect.height, imageWidth, imageHeight));
   const x = Math.max(0, Math.min(rect.x, imageWidth - size));
@@ -283,20 +289,25 @@ async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadg
     result.logo = { ...spec.logoPlacement };
   }
 
-  // rules.js 상 인라인 LIVE(문장 속 "LIVE" 글자)와 별도 liveBadgePlacement는 같은 LIVE 요소를 표현하는
-  // 배타적인 두 가지 방식이어야 하지만, 모델이 가끔 둘 다 반환할 때가 있다. 그대로 두면 Figma에서 LIVE 로고가
-  // 문장 안에도, 별도 뱃지로도 중복 렌더링되므로 인라인이 있으면 그쪽을 우선하고 별도 배치는 무시한다.
-  const hasInlineLive = (spec.texts || []).some((t) => t.content && t.content.includes("LIVE"));
+  // 문장 속 인라인 "LIVE"(texts 안의 글자)와 날짜 옆 별도 liveBadgePlacement는 한 소재 안에 동시에
+  // 나올 수 있는 서로 다른 두 인스턴스다(예: 날짜 옆 독립 배지 + 본문 카피 속 LIVE). 모든 "LIVE" 글자는
+  // 항상 로고 이미지로 치환되어야 하므로 원칙적으로 둘 다 붙인다 — 다만 모델이 같은 LIVE를 중복으로
+  // 반환하는 경우(별도 배지 위치가 인라인 LIVE가 있는 텍스트 영역과 겹침)만 배지 쪽을 무시한다.
+  const inlineLiveTexts = (spec.texts || []).filter((t) => t.content && t.content.includes("LIVE"));
+  const hasInlineLive = inlineLiveTexts.length > 0;
+  const liveBadgeIsDuplicate =
+    spec.liveBadgePlacement && inlineLiveTexts.some((t) => rectsOverlap(spec.liveBadgePlacement, t));
 
-  if (hasInlineLive) {
-    if (liveBadgePath) {
-      result.liveLogoAsset = { base64: fs.readFileSync(resolveActualPath(liveBadgePath)).toString("base64") };
+  if ((spec.liveBadgePlacement && !liveBadgeIsDuplicate) || hasInlineLive) {
+    const liveBadgeBase64 = liveBadgePath ? fs.readFileSync(resolveActualPath(liveBadgePath)).toString("base64") : undefined;
+    if (spec.liveBadgePlacement && !liveBadgeIsDuplicate) {
+      result.liveBadge = liveBadgeBase64
+        ? { ...spec.liveBadgePlacement, base64: liveBadgeBase64 }
+        : { ...spec.liveBadgePlacement };
     }
-  } else if (spec.liveBadgePlacement && liveBadgePath) {
-    const liveBadgeBase64 = fs.readFileSync(resolveActualPath(liveBadgePath)).toString("base64");
-    result.liveBadge = { ...spec.liveBadgePlacement, base64: liveBadgeBase64 };
-  } else if (spec.liveBadgePlacement) {
-    result.liveBadge = { ...spec.liveBadgePlacement };
+    if (hasInlineLive && liveBadgeBase64) {
+      result.liveLogoAsset = { base64: liveBadgeBase64 };
+    }
   }
 
   if (spec.badgePlacement && badgePath) {
