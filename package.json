@@ -1,0 +1,18 @@
+{
+  "name": "material-auto-builder",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "analyze": "node vision/analyze.js"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@google/genai": "^0.15.0",
+    "sharp": "^0.33.0"
+  }
+}
