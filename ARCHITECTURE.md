@@ -70,19 +70,25 @@ interface MaterialSpec {
     color: [number, number, number]; // 0~1 RGB
     align?: "LEFT" | "CENTER" | "RIGHT";
     backdrop?: { type: "gradient" | "blur"; color: [r,g,b,a]; blurRadius?: number };
-    highlights?: { text: string; color: [r,g,b] }[];
+    highlights?: { text: string; color: [r,g,b]; background?: [r,g,b,a]; cornerRadius?: number }[];
   }[];
   logo?: { x: number; y: number; width: number; height: number; base64?: string };
   liveBadge?: { x: number; y: number; width: number; height: number; base64?: string };
 }
 ```
 
-- `mainImage`는 크롭 없이 프레임 전체(보통 x:0,y:0,width:1080,height:1080)를 채운다. Figma의
-  `scaleMode: "FILL"`이 자동으로 cover 크롭을 처리해준다.
+- `mainImage`는 크롭 없이 프레임 전체(보통 x:0,y:0, width/height는 frame과 동일 — 기본 1080x1080이지만
+  `vision/analyze.js` 실행 시 `outputWidth`/`outputHeight`(또는 `outputSize: "1200x675"` 같은 문자열)를
+  넘기면 가로형/세로형 등 다른 크기도 가능하다)를 채운다. Figma의 `scaleMode: "FILL"`이 자동으로 cover
+  크롭을 처리해준다.
 - `texts[].content`에 "LIVE"라는 글자가 포함되어 있고 `liveBadge.base64`가 있으면, 그 부분은 텍스트로
   렌더링되지 않고 자동으로 `liveBadge` 이미지로 치환된다 (RULES.md 4번 항목).
 - `logo`/`liveBadge`는 `base64`가 없으면 회색 placeholder 사각형으로 렌더링된다 (에셋 준비 전 레이아웃
   확인용).
+- `highlights[].background`가 있으면 그 단어 뒤에 둥근 사각형 배경(예: 가격인상 경고 문구의 빨간 박스)이
+  자동으로 그려진다. "LIVE" 인라인 치환과 같은 방식(텍스트를 조각내 실제 렌더링 폭을 측정)으로 처리되며,
+  한 줄에 LIVE 치환과 배경 강조가 동시에 있어도 함께 처리된다 (RULES.md 7번 항목, `code.ts`의
+  `renderTextWithSegments()`).
 
 ## 셋업
 
@@ -321,11 +327,11 @@ fallback한다 — 새로운 기획전 유형이 와도 파이프라인이 멈�
 
 ## 알려진 한계 / 다음 단계 후보
 
-- `highlights`(부분 색상 강조)는 텍스트 전체 단일 노드에만 적용 가능 — "LIVE" 인라인 치환처럼 텍스트를
-  쪼개서 배치하는 경로에서는 적용 안 됨 (현재는 필요 없음, LIVE는 항상 이미지로 치환되므로)
 - cropRect 정확도 — 저해상도 시안 vs 고해상도 원본 간 구도 매칭은 모델의 시각적 추정에 의존, 오차 가능
 - Figma 플러그인과 vision/analyze.js가 아직 직접 연결되어 있지 않음 (JSON 파일/붙여넣기로 수동 전달)
-- 정사각형 외 세로형/가로형 소재 사이즈 미지원 (OUTPUT_SIZE 고정)
+- 가로형/세로형 소재 사이즈는 `vision/analyze.js` 실행 시 `outputWidth`/`outputHeight`(또는 `outputSize`)를
+  넘기면 지원됨(기본은 여전히 정사각형 1080x1080) — 다만 배치/매칭 모드에서 소재마다 다른 크기를 섞어
+  쓰는 것은 지원 안 함(한 번의 실행에는 하나의 크기만 적용)
 - 여러 텍스트 배리에이션 배치 생성 미지원
 - 배치 모드는 `output-spec-N.json`을 여러 개 생성하는 것까지만 지원 — Figma 쪽에서 여러 프레임을 한 번에
   생성하는 기능은 아직 없음 (지금은 하나씩 "파일 불러오기"로 불러와야 함)

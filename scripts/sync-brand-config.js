@@ -29,7 +29,7 @@ function countOccurrences(haystack, needle) {
 }
 
 function generateBlock(brandConfig) {
-  const { font, liveInlineLogo, backdrop } = brandConfig;
+  const { font, liveInlineLogo, backdrop, highlightBadge } = brandConfig;
   return [
     `const KR_FAMILY = ${JSON.stringify(font.krFamily)};`,
     `const LATIN_FAMILY = ${JSON.stringify(font.latinFamily)};`,
@@ -39,6 +39,9 @@ function generateBlock(brandConfig) {
     `const LIVE_INLINE_LOGO_HEIGHT_RATIO = ${liveInlineLogo.heightRatio};`,
     `const LIVE_INLINE_LOGO_GAP_RATIO = ${liveInlineLogo.gapRatio};`,
     `const DEFAULT_BACKDROP_BLUR_RADIUS = ${backdrop.defaultBlurRadius};`,
+    `const HIGHLIGHT_BADGE_PAD_X_RATIO = ${highlightBadge.paddingXRatio};`,
+    `const HIGHLIGHT_BADGE_PAD_Y_RATIO = ${highlightBadge.paddingYRatio};`,
+    `const HIGHLIGHT_BADGE_CORNER_RADIUS = ${highlightBadge.cornerRadius};`,
   ].join("\n");
 }
 

@@ -131,7 +131,16 @@
 "LIVE" 외에 특정 단어만 다른 색으로 강조되어 있는 경우(예: 브랜드 포인트 컬러), 그 단어와 색을
 개별 지정해서 부분 색상 적용이 가능하다.
 
-- 수정 위치: `vision/analyze.js`의 `MATERIAL_SPEC_SCHEMA` → `texts.items.properties.highlights`
+문장 속 일부 단어 뒤에 눈에 띄는 색 박스가 깔려 있는 경우(예: "가격 인상 전" 같은 경고 문구를 감싼
+빨간 둥근 사각형)도 같은 highlights 항목에 `background`(RGBA)를 추가로 지정하면 그 단어 뒤에 둥근
+사각형 배경을 자동으로 그려준다. 박스 없이 글자 색만 다른 경우는 `background`를 생략하면 된다.
+
+- 수정 위치:
+  - 스키마 정의(`background`, `cornerRadius` 필드 포함) → `vision/analyze.js`의 `MATERIAL_SPEC_SCHEMA`
+    → `texts.items.properties.highlights`
+  - 배경 박스의 좌우/상하 여백 비율, 기본 모서리 반경 → `brand.config.json`의 `highlightBadge.paddingXRatio`,
+    `highlightBadge.paddingYRatio`, `highlightBadge.cornerRadius` (빌드 시 `code.ts` 규칙 블록에 자동 반영됨)
+  - 렌더링 로직(텍스트를 조각내서 배경 박스 크기를 측정하고 배치) → `code.ts`의 `renderTextWithSegments()`
 
 ## 8. 가독성 처리 (텍스트 배경 패널, backdrop)
 

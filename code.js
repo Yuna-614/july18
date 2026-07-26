@@ -30,6 +30,9 @@ const FALLBACK_FONT = { family: "Inter", style: "Regular" };
 const LIVE_INLINE_LOGO_HEIGHT_RATIO = 1.05;
 const LIVE_INLINE_LOGO_GAP_RATIO = 0.15;
 const DEFAULT_BACKDROP_BLUR_RADIUS = 20;
+const HIGHLIGHT_BADGE_PAD_X_RATIO = 0.28;
+const HIGHLIGHT_BADGE_PAD_Y_RATIO = 0.12;
+const HIGHLIGHT_BADGE_CORNER_RADIUS = 0;
 // === BRAND_CONFIG_END ===
 // ============================================================
 // 규칙 블록 끝
@@ -135,56 +138,125 @@ function createTextBackdrop(t) {
     }
     return rect;
 }
-// content 안의 "LIVE" 문자열을 모두 실제 로고 이미지로 치환해서 배치한다. content가 여러 줄("\n" 포함)일
-// 수 있으므로 줄 단위로 나눠서 처리한다 — "LIVE"가 없는 줄은 그대로 한 줄 텍스트로, 있는 줄만 "LIVE" 기준으로
-// 쪼개 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고, 그 폭을 이어붙여 정렬(align)에
-// 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다. 다음 줄의 y좌표는 이전 줄에서 측정된 실제 높이만큼 내려간다.
-function renderTextWithInlineLiveLogo(frame, t, logo) {
+function tokenizeLine(line, highlights, hasLiveLogo) {
+    var _a;
+    const markers = [];
+    if (hasLiveLogo) {
+        let idx = line.indexOf("LIVE");
+        while (idx !== -1) {
+            markers.push({ start: idx, end: idx + 4, token: { kind: "live" } });
+            idx = line.indexOf("LIVE", idx + 4);
+        }
+    }
+    for (const h of highlights) {
+        if (!h.background)
+            continue;
+        let idx = line.indexOf(h.text);
+        while (idx !== -1) {
+            markers.push({
+                start: idx,
+                end: idx + h.text.length,
+                token: {
+                    kind: "highlight",
+                    text: h.text,
+                    color: h.color,
+                    background: h.background,
+                    cornerRadius: (_a = h.cornerRadius) !== null && _a !== void 0 ? _a : HIGHLIGHT_BADGE_CORNER_RADIUS,
+                    fontWeight: h.fontWeight,
+                },
+            });
+            idx = line.indexOf(h.text, idx + h.text.length);
+        }
+    }
+    markers.sort((a, b) => a.start - b.start);
+    const tokens = [];
+    let cursor = 0;
+    for (const m of markers) {
+        if (m.start < cursor)
+            continue; // 겹치는 마커는 먼저 온 것을 우선하고 뒤엣것은 무시
+        if (m.start > cursor)
+            tokens.push({ kind: "text", text: line.slice(cursor, m.start) });
+        tokens.push(m.token);
+        cursor = m.end;
+    }
+    if (cursor < line.length || tokens.length === 0)
+        tokens.push({ kind: "text", text: line.slice(cursor) });
+    return tokens;
+}
+// content 안의 "LIVE" 치환 이미지와 배경 박스가 있는 highlight를 함께 처리하며 한 줄씩 배치한다(둘 다 없는
+// 조각은 그냥 일반 텍스트). 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고, 그 폭을
+// 이어붙여 정렬(align)에 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다. 다음 줄의 y좌표는 이전 줄에서
+// 측정된 실제 높이만큼 내려간다.
+function renderTextWithSegments(frame, t, logo) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a, _b;
+        const hasLiveLogo = !!logo && t.content.includes("LIVE");
         const gap = t.fontSize * LIVE_INLINE_LOGO_GAP_RATIO;
         const logoHeight = t.fontSize * LIVE_INLINE_LOGO_HEIGHT_RATIO;
-        const logoWidth = logoHeight * logo.aspect;
+        const logoWidth = logo ? logoHeight * logo.aspect : 0;
+        const padX = t.fontSize * HIGHLIGHT_BADGE_PAD_X_RATIO;
+        const padY = t.fontSize * HIGHLIGHT_BADGE_PAD_Y_RATIO;
         let cursorY = t.y;
         for (const line of t.content.split("\n")) {
-            const parts = line.includes("LIVE") ? line.split("LIVE") : [line];
-            const segments = [];
-            for (const part of parts) {
-                if (!part) {
-                    segments.push(null);
+            const tokens = tokenizeLine(line, (_a = t.highlights) !== null && _a !== void 0 ? _a : [], hasLiveLogo);
+            const measured = [];
+            for (const token of tokens) {
+                if (token.kind === "live") {
+                    measured.push({ kind: "live" });
                     continue;
                 }
+                if (!token.text)
+                    continue;
                 const node = figma.createText();
-                yield applyMixedFontText(node, part, t.fontWeight);
+                const weight = token.kind === "highlight" ? (_b = token.fontWeight) !== null && _b !== void 0 ? _b : t.fontWeight : t.fontWeight;
+                yield applyMixedFontText(node, token.text, weight);
                 node.fontSize = t.fontSize;
-                node.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
+                const color = token.kind === "highlight" ? token.color : t.color;
+                node.fills = [{ type: "SOLID", color: { r: color[0], g: color[1], b: color[2] } }];
                 node.textAutoResize = "WIDTH_AND_HEIGHT"; // 실제 렌더링 폭/높이를 읽기 위해 콘텐츠에 맞춰 크기 측정
-                segments.push(node);
+                if (token.kind === "highlight") {
+                    measured.push({ kind: "highlight", node, background: token.background, cornerRadius: token.cornerRadius });
+                }
+                else {
+                    measured.push({ kind: "text", node });
+                }
             }
             let totalWidth = 0;
-            let lineHeight = t.fontSize * 1.3; // 세그먼트가 전부 빈 값일 때(빈 줄)를 대비한 기본값
-            segments.forEach((node, i) => {
-                if (node) {
-                    totalWidth += node.width;
-                    lineHeight = Math.max(lineHeight, node.height);
+            let lineHeight = t.fontSize * 1.3; // 조각이 전부 빈 값일 때(빈 줄)를 대비한 기본값
+            measured.forEach((m) => {
+                if (m.kind === "live") {
+                    totalWidth += logoWidth;
+                    lineHeight = Math.max(lineHeight, logoHeight);
                 }
-                if (i < segments.length - 1)
-                    totalWidth += gap + logoWidth + gap;
+                else if (m.kind === "highlight") {
+                    totalWidth += m.node.width + padX * 2;
+                    lineHeight = Math.max(lineHeight, m.node.height);
+                }
+                else {
+                    totalWidth += m.node.width;
+                    lineHeight = Math.max(lineHeight, m.node.height);
+                }
+            });
+            // LIVE 조각 앞뒤로는 기존과 동일하게 gap을 더한다. highlight는 패딩 자체가 여백 역할을 하므로
+            // 추가 gap을 두지 않는다(시안에서 배경 박스가 옆 텍스트와 거의 붙어 있는 모양과 일치).
+            tokens.forEach((token, i) => {
+                if (token.kind !== "live")
+                    return;
+                if (i > 0)
+                    totalWidth += gap;
+                if (i < tokens.length - 1)
+                    totalWidth += gap;
             });
             let cursorX = t.x;
             if (t.align === "RIGHT")
                 cursorX = t.x + t.width - totalWidth;
             else if (t.align === "CENTER")
                 cursorX = t.x + (t.width - totalWidth) / 2;
-            for (let i = 0; i < segments.length; i++) {
-                const node = segments[i];
-                if (node) {
-                    node.x = cursorX;
-                    node.y = cursorY;
-                    frame.appendChild(node);
-                    cursorX += node.width;
-                }
-                if (i < segments.length - 1) {
+            for (let i = 0; i < measured.length; i++) {
+                const m = measured[i];
+                if (tokens[i].kind === "live" && i > 0)
                     cursorX += gap;
+                if (m.kind === "live") {
                     const rect = figma.createRectangle();
                     rect.name = "Live Inline Logo";
                     rect.resize(logoWidth, logoHeight);
@@ -192,8 +264,33 @@ function renderTextWithInlineLiveLogo(frame, t, logo) {
                     rect.y = cursorY + (t.fontSize - logoHeight) / 2;
                     rect.fills = [{ type: "IMAGE", imageHash: logo.imageHash, scaleMode: "FIT" }];
                     frame.appendChild(rect);
-                    cursorX += logoWidth + gap;
+                    cursorX += logoWidth;
                 }
+                else if (m.kind === "highlight") {
+                    const boxWidth = m.node.width + padX * 2;
+                    const boxHeight = m.node.height + padY * 2;
+                    const bg = figma.createRectangle();
+                    bg.name = "Highlight Background";
+                    bg.resize(boxWidth, boxHeight);
+                    bg.cornerRadius = m.cornerRadius;
+                    bg.x = cursorX;
+                    bg.y = cursorY - padY;
+                    const [r, g, b, a] = m.background;
+                    bg.fills = [{ type: "SOLID", color: { r, g, b }, opacity: a }];
+                    frame.appendChild(bg);
+                    m.node.x = cursorX + padX;
+                    m.node.y = cursorY;
+                    frame.appendChild(m.node);
+                    cursorX += boxWidth;
+                }
+                else {
+                    m.node.x = cursorX;
+                    m.node.y = cursorY;
+                    frame.appendChild(m.node);
+                    cursorX += m.node.width;
+                }
+                if (tokens[i].kind === "live" && i < measured.length - 1)
+                    cursorX += gap;
             }
             cursorY += lineHeight;
         }
@@ -218,7 +315,7 @@ function placeImageAsset(frame, asset, name) {
 }
 function buildMaterial(spec) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d;
+        var _a, _b, _c, _d, _e;
         const frame = figma.createFrame();
         frame.name = spec.frame.name || "Generated Material";
         frame.resize(spec.frame.width, spec.frame.height);
@@ -261,8 +358,9 @@ function buildMaterial(spec) {
             if (t.backdrop) {
                 frame.appendChild(createTextBackdrop(t));
             }
-            if (inlineLiveLogo && t.content.includes("LIVE")) {
-                yield renderTextWithInlineLiveLogo(frame, t, inlineLiveLogo);
+            const hasBackgroundHighlight = ((_d = t.highlights) !== null && _d !== void 0 ? _d : []).some((h) => h.background);
+            if ((inlineLiveLogo && t.content.includes("LIVE")) || hasBackgroundHighlight) {
+                yield renderTextWithSegments(frame, t, inlineLiveLogo);
                 continue;
             }
             const textNode = figma.createText();
@@ -274,7 +372,7 @@ function buildMaterial(spec) {
             textNode.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
             if (t.align)
                 textNode.textAlignHorizontal = t.align;
-            for (const h of (_d = t.highlights) !== null && _d !== void 0 ? _d : []) {
+            for (const h of (_e = t.highlights) !== null && _e !== void 0 ? _e : []) {
                 const start = t.content.indexOf(h.text);
                 if (start === -1)
                     continue;
@@ -282,6 +380,12 @@ function buildMaterial(spec) {
                 textNode.setRangeFills(start, end, [
                     { type: "SOLID", color: { r: h.color[0], g: h.color[1], b: h.color[2] } },
                 ]);
+                if (h.fontWeight) {
+                    // 강조 구간의 첫 글자 기준으로 이 구간의 폰트 패밀리를 판단한다(구간 내 국문/영문 혼용은 지원 안 함).
+                    const family = isLatinChar(h.text[0]) ? LATIN_FAMILY : KR_FAMILY;
+                    const font = yield loadFontOrFallback(family, FONT_WEIGHT_MAP[h.fontWeight]);
+                    textNode.setRangeFontName(start, end, font);
+                }
             }
             frame.appendChild(textNode);
         }

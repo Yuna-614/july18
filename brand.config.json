@@ -15,6 +15,11 @@
   "backdrop": {
     "defaultBlurRadius": 20
   },
+  "highlightBadge": {
+    "paddingXRatio": 0.28,
+    "paddingYRatio": 0.12,
+    "cornerRadius": 0
+  },
   "assets": {
     "logoPath": "요소/알로소 로고_화이트.png",
     "liveBadgePath": "요소/LIVE 로.png"

@@ -21,6 +21,13 @@ interface TextBackdropSpec {
 interface TextHighlightSpec {
   text: string;
   color: [number, number, number];
+  // 있으면 이 구간 뒤에 둥근 사각형 배경(예: 가격인상 경고 문구의 빨간 박스)을 그린다. RGBA 0~1.
+  background?: [number, number, number, number];
+  // background가 있을 때만 사용. 생략하면 brand.config.json의 highlightBadge.cornerRadius 기본값 사용.
+  cornerRadius?: number;
+  // 이 구간만 본문과 다른 굵기로 렌더링해야 하면 지정 (예: "브랜드×브랜드" 콜라보 표기에서 가운데 "×"만
+  // 얇게). 생략하면 텍스트 전체에 적용된 fontWeight를 그대로 사용.
+  fontWeight?: "regular" | "medium" | "bold";
 }
 
 interface TextSpec {
@@ -100,6 +107,9 @@ const FALLBACK_FONT: FontName = { family: "Inter", style: "Regular" };
 const LIVE_INLINE_LOGO_HEIGHT_RATIO = 1.05;
 const LIVE_INLINE_LOGO_GAP_RATIO = 0.15;
 const DEFAULT_BACKDROP_BLUR_RADIUS = 20;
+const HIGHLIGHT_BADGE_PAD_X_RATIO = 0.28;
+const HIGHLIGHT_BADGE_PAD_Y_RATIO = 0.12;
+const HIGHLIGHT_BADGE_CORNER_RADIUS = 0;
 // === BRAND_CONFIG_END ===
 // ============================================================
 // 규칙 블록 끝
@@ -215,66 +225,170 @@ interface InlineLiveLogo {
   aspect: number; // width / height
 }
 
-// content 안의 "LIVE" 문자열을 모두 실제 로고 이미지로 치환해서 배치한다. content가 여러 줄("\n" 포함)일
-// 수 있으므로 줄 단위로 나눠서 처리한다 — "LIVE"가 없는 줄은 그대로 한 줄 텍스트로, 있는 줄만 "LIVE" 기준으로
-// 쪼개 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고, 그 폭을 이어붙여 정렬(align)에
-// 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다. 다음 줄의 y좌표는 이전 줄에서 측정된 실제 높이만큼 내려간다.
-async function renderTextWithInlineLiveLogo(frame: FrameNode, t: TextSpec, logo: InlineLiveLogo): Promise<void> {
+// 한 줄(content.split("\n")의 한 조각) 안에서 특수 처리가 필요한 구간(LIVE 치환 이미지, 배경 박스가 있는
+// highlight)을 순서대로 찾아 일반 텍스트/특수 토큰으로 쪼갠다. 배경 없는 highlight(색상만 다른 경우)는
+// 여기서 다루지 않고 기존 setRangeFills 경로로 처리되므로 포함하지 않는다.
+type LineToken =
+  | { kind: "text"; text: string }
+  | { kind: "live" }
+  | {
+      kind: "highlight";
+      text: string;
+      color: [number, number, number];
+      background: [number, number, number, number];
+      cornerRadius: number;
+      fontWeight?: TextSpec["fontWeight"];
+    };
+
+function tokenizeLine(line: string, highlights: TextHighlightSpec[], hasLiveLogo: boolean): LineToken[] {
+  const markers: { start: number; end: number; token: LineToken }[] = [];
+
+  if (hasLiveLogo) {
+    let idx = line.indexOf("LIVE");
+    while (idx !== -1) {
+      markers.push({ start: idx, end: idx + 4, token: { kind: "live" } });
+      idx = line.indexOf("LIVE", idx + 4);
+    }
+  }
+  for (const h of highlights) {
+    if (!h.background) continue;
+    let idx = line.indexOf(h.text);
+    while (idx !== -1) {
+      markers.push({
+        start: idx,
+        end: idx + h.text.length,
+        token: {
+          kind: "highlight",
+          text: h.text,
+          color: h.color,
+          background: h.background,
+          cornerRadius: h.cornerRadius ?? HIGHLIGHT_BADGE_CORNER_RADIUS,
+          fontWeight: h.fontWeight,
+        },
+      });
+      idx = line.indexOf(h.text, idx + h.text.length);
+    }
+  }
+  markers.sort((a, b) => a.start - b.start);
+
+  const tokens: LineToken[] = [];
+  let cursor = 0;
+  for (const m of markers) {
+    if (m.start < cursor) continue; // 겹치는 마커는 먼저 온 것을 우선하고 뒤엣것은 무시
+    if (m.start > cursor) tokens.push({ kind: "text", text: line.slice(cursor, m.start) });
+    tokens.push(m.token);
+    cursor = m.end;
+  }
+  if (cursor < line.length || tokens.length === 0) tokens.push({ kind: "text", text: line.slice(cursor) });
+  return tokens;
+}
+
+// content 안의 "LIVE" 치환 이미지와 배경 박스가 있는 highlight를 함께 처리하며 한 줄씩 배치한다(둘 다 없는
+// 조각은 그냥 일반 텍스트). 각 조각을 auto-resize 텍스트 노드로 만들어 실제 렌더링 폭을 측정하고, 그 폭을
+// 이어붙여 정렬(align)에 맞는 시작 x좌표를 계산한 뒤 순서대로 배치한다. 다음 줄의 y좌표는 이전 줄에서
+// 측정된 실제 높이만큼 내려간다.
+async function renderTextWithSegments(frame: FrameNode, t: TextSpec, logo: InlineLiveLogo | null): Promise<void> {
+  const hasLiveLogo = !!logo && t.content.includes("LIVE");
   const gap = t.fontSize * LIVE_INLINE_LOGO_GAP_RATIO;
   const logoHeight = t.fontSize * LIVE_INLINE_LOGO_HEIGHT_RATIO;
-  const logoWidth = logoHeight * logo.aspect;
+  const logoWidth = logo ? logoHeight * logo.aspect : 0;
+  const padX = t.fontSize * HIGHLIGHT_BADGE_PAD_X_RATIO;
+  const padY = t.fontSize * HIGHLIGHT_BADGE_PAD_Y_RATIO;
+
+  type Measured =
+    | { kind: "live" }
+    | { kind: "text"; node: TextNode }
+    | { kind: "highlight"; node: TextNode; background: [number, number, number, number]; cornerRadius: number };
 
   let cursorY = t.y;
   for (const line of t.content.split("\n")) {
-    const parts = line.includes("LIVE") ? line.split("LIVE") : [line];
+    const tokens = tokenizeLine(line, t.highlights ?? [], hasLiveLogo);
 
-    const segments: (TextNode | null)[] = [];
-    for (const part of parts) {
-      if (!part) {
-        segments.push(null);
+    const measured: Measured[] = [];
+    for (const token of tokens) {
+      if (token.kind === "live") {
+        measured.push({ kind: "live" });
         continue;
       }
+      if (!token.text) continue;
       const node = figma.createText();
-      await applyMixedFontText(node, part, t.fontWeight);
+      const weight = token.kind === "highlight" ? token.fontWeight ?? t.fontWeight : t.fontWeight;
+      await applyMixedFontText(node, token.text, weight);
       node.fontSize = t.fontSize;
-      node.fills = [{ type: "SOLID", color: { r: t.color[0], g: t.color[1], b: t.color[2] } }];
+      const color = token.kind === "highlight" ? token.color : t.color;
+      node.fills = [{ type: "SOLID", color: { r: color[0], g: color[1], b: color[2] } }];
       node.textAutoResize = "WIDTH_AND_HEIGHT"; // 실제 렌더링 폭/높이를 읽기 위해 콘텐츠에 맞춰 크기 측정
-      segments.push(node);
+      if (token.kind === "highlight") {
+        measured.push({ kind: "highlight", node, background: token.background, cornerRadius: token.cornerRadius });
+      } else {
+        measured.push({ kind: "text", node });
+      }
     }
 
     let totalWidth = 0;
-    let lineHeight = t.fontSize * 1.3; // 세그먼트가 전부 빈 값일 때(빈 줄)를 대비한 기본값
-    segments.forEach((node, i) => {
-      if (node) {
-        totalWidth += node.width;
-        lineHeight = Math.max(lineHeight, node.height);
+    let lineHeight = t.fontSize * 1.3; // 조각이 전부 빈 값일 때(빈 줄)를 대비한 기본값
+    measured.forEach((m) => {
+      if (m.kind === "live") {
+        totalWidth += logoWidth;
+        lineHeight = Math.max(lineHeight, logoHeight);
+      } else if (m.kind === "highlight") {
+        totalWidth += m.node.width + padX * 2;
+        lineHeight = Math.max(lineHeight, m.node.height);
+      } else {
+        totalWidth += m.node.width;
+        lineHeight = Math.max(lineHeight, m.node.height);
       }
-      if (i < segments.length - 1) totalWidth += gap + logoWidth + gap;
+    });
+    // LIVE 조각 앞뒤로는 기존과 동일하게 gap을 더한다. highlight는 패딩 자체가 여백 역할을 하므로
+    // 추가 gap을 두지 않는다(시안에서 배경 박스가 옆 텍스트와 거의 붙어 있는 모양과 일치).
+    tokens.forEach((token, i) => {
+      if (token.kind !== "live") return;
+      if (i > 0) totalWidth += gap;
+      if (i < tokens.length - 1) totalWidth += gap;
     });
 
     let cursorX = t.x;
     if (t.align === "RIGHT") cursorX = t.x + t.width - totalWidth;
     else if (t.align === "CENTER") cursorX = t.x + (t.width - totalWidth) / 2;
 
-    for (let i = 0; i < segments.length; i++) {
-      const node = segments[i];
-      if (node) {
-        node.x = cursorX;
-        node.y = cursorY;
-        frame.appendChild(node);
-        cursorX += node.width;
-      }
-      if (i < segments.length - 1) {
-        cursorX += gap;
+    for (let i = 0; i < measured.length; i++) {
+      const m = measured[i];
+      if (tokens[i].kind === "live" && i > 0) cursorX += gap;
+
+      if (m.kind === "live") {
         const rect = figma.createRectangle();
         rect.name = "Live Inline Logo";
         rect.resize(logoWidth, logoHeight);
         rect.x = cursorX;
         rect.y = cursorY + (t.fontSize - logoHeight) / 2;
-        rect.fills = [{ type: "IMAGE", imageHash: logo.imageHash, scaleMode: "FIT" }];
+        rect.fills = [{ type: "IMAGE", imageHash: logo!.imageHash, scaleMode: "FIT" }];
         frame.appendChild(rect);
-        cursorX += logoWidth + gap;
+        cursorX += logoWidth;
+      } else if (m.kind === "highlight") {
+        const boxWidth = m.node.width + padX * 2;
+        const boxHeight = m.node.height + padY * 2;
+        const bg = figma.createRectangle();
+        bg.name = "Highlight Background";
+        bg.resize(boxWidth, boxHeight);
+        bg.cornerRadius = m.cornerRadius;
+        bg.x = cursorX;
+        bg.y = cursorY - padY;
+        const [r, g, b, a] = m.background;
+        bg.fills = [{ type: "SOLID", color: { r, g, b }, opacity: a }];
+        frame.appendChild(bg);
+
+        m.node.x = cursorX + padX;
+        m.node.y = cursorY;
+        frame.appendChild(m.node);
+        cursorX += boxWidth;
+      } else {
+        m.node.x = cursorX;
+        m.node.y = cursorY;
+        frame.appendChild(m.node);
+        cursorX += m.node.width;
       }
+
+      if (tokens[i].kind === "live" && i < measured.length - 1) cursorX += gap;
     }
 
     cursorY += lineHeight;
@@ -347,8 +461,9 @@ async function buildMaterial(spec: MaterialSpec): Promise<FrameNode> {
       frame.appendChild(createTextBackdrop(t));
     }
 
-    if (inlineLiveLogo && t.content.includes("LIVE")) {
-      await renderTextWithInlineLiveLogo(frame, t, inlineLiveLogo);
+    const hasBackgroundHighlight = (t.highlights ?? []).some((h) => h.background);
+    if ((inlineLiveLogo && t.content.includes("LIVE")) || hasBackgroundHighlight) {
+      await renderTextWithSegments(frame, t, inlineLiveLogo);
       continue;
     }
 
@@ -368,6 +483,12 @@ async function buildMaterial(spec: MaterialSpec): Promise<FrameNode> {
       textNode.setRangeFills(start, end, [
         { type: "SOLID", color: { r: h.color[0], g: h.color[1], b: h.color[2] } },
       ]);
+      if (h.fontWeight) {
+        // 강조 구간의 첫 글자 기준으로 이 구간의 폰트 패밀리를 판단한다(구간 내 국문/영문 혼용은 지원 안 함).
+        const family = isLatinChar(h.text[0]) ? LATIN_FAMILY : KR_FAMILY;
+        const font = await loadFontOrFallback(family, FONT_WEIGHT_MAP[h.fontWeight]);
+        textNode.setRangeFontName(start, end, font);
+      }
     }
 
     frame.appendChild(textNode);

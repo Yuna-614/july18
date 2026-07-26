@@ -21,18 +21,35 @@ function resolveActualPath(filePath) {
   return path.join(dir, match);
 }
 
+function gcd(a, b) {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+// 예: (1200, 675) -> "16:9". 스키마 설명 문구를 사람이 읽기 쉽게 만드는 용도.
+function aspectLabel(width, height) {
+  const g = gcd(width, height) || 1;
+  return `${width / g}:${height / g}`;
+}
+
 // 모델에게 두 장의 이미지를 함께 준다:
 //   referenceImage(시안) - 광고주가 준 레이아웃/구도 레퍼런스 (텍스트/로고 포함된 완성본)
 //   originalImage(원본)  - 크롭되지 않은 실제 고해상도 원본 사진
-// 모델은 원본 이미지 좌표계에서 "시안과 같은 구도를 재현하는 정사각형 크롭 영역"을 찾고,
-// 텍스트/로고 위치는 1080x1080 출력 캔버스 기준으로 스케일링해서 알려준다.
-const MATERIAL_SPEC_SCHEMA = {
+// 모델은 원본 이미지 좌표계에서 "시안과 같은 구도를 재현하는 크롭 영역"을 찾고,
+// 텍스트/로고 위치는 출력 캔버스(outputWidth x outputHeight) 기준으로 스케일링해서 알려준다.
+// 기본은 정사각형(1080x1080)이지만, 가로형/세로형 소재는 다른 크기를 받을 수 있어 스키마 설명
+// 문구를 실행 시점의 실제 출력 크기에 맞춰 동적으로 만든다.
+function buildMaterialSpecSchema(outputWidth, outputHeight) {
+  const isSquare = outputWidth === outputHeight;
+  const cropShapeDescription = isSquare
+    ? "원본 이미지 좌표계에서, 시안과 동일한 구도를 재현하기 위해 잘라내야 할 정사각형 영역(x, y, width, height). width와 height는 같아야 함(정사각형)"
+    : `원본 이미지 좌표계에서, 시안과 동일한 구도를 재현하기 위해 잘라내야 할 영역(x, y, width, height). width:height 비율이 ${outputWidth}:${outputHeight}(${aspectLabel(outputWidth, outputHeight)})와 같아야 함`;
+
+  return {
   type: "object",
   properties: {
     cropRect: {
       type: "object",
-      description:
-        "원본 이미지 좌표계에서, 시안과 동일한 구도를 재현하기 위해 잘라내야 할 정사각형 영역(x, y, width, height). width와 height는 같아야 함(정사각형)",
+      description: cropShapeDescription,
       properties: {
         x: { type: "integer" },
         y: { type: "integer" },
@@ -43,7 +60,7 @@ const MATERIAL_SPEC_SCHEMA = {
     },
     texts: {
       type: "array",
-      description: `모든 좌표는 최종 출력 캔버스(${OUTPUT_SIZE}x${OUTPUT_SIZE}px) 기준으로 스케일링해서 산출`,
+      description: `모든 좌표는 최종 출력 캔버스(${outputWidth}x${outputHeight}px) 기준으로 스케일링해서 산출`,
       items: {
         type: "object",
         properties: {
@@ -102,7 +119,8 @@ const MATERIAL_SPEC_SCHEMA = {
           highlights: {
             type: "array",
             description:
-              "content 안에서 일부 단어만 다른 색으로 강조해야 하면 그 단어와 색을 기재. 'LIVE'는 렌더링 단계에서 항상 로고 이미지로 자동 치환되므로 여기 포함하지 말 것. 강조할 부분이 없으면 생략",
+              "content 안에서 일부 단어만 다른 색으로 강조하거나, 그 단어 뒤에 색이 있는 둥근 사각형 배경을 깔아야 하면 기재. " +
+              "'LIVE'는 렌더링 단계에서 항상 로고 이미지로 자동 치환되므로 여기 포함하지 말 것. 강조할 부분이 없으면 생략",
             items: {
               type: "object",
               properties: {
@@ -112,7 +130,16 @@ const MATERIAL_SPEC_SCHEMA = {
                   items: { type: "number" },
                   minItems: 3,
                   maxItems: 3,
-                  description: "0~1 사이 실수 RGB",
+                  description: "이 구간 텍스트 색상. 0~1 사이 실수 RGB (background가 있으면 보통 흰색 등 배경과 대비되는 색)",
+                },
+                background: {
+                  type: "array",
+                  items: { type: "number" },
+                  minItems: 4,
+                  maxItems: 4,
+                  description:
+                    "시안에서 이 단어 뒤에 눈에 띄는 색 박스(예: '가격 인상 전' 같은 경고 문구를 감싼 빨간 박스)가 깔려 있을 때만 기재. " +
+                    "0~1 사이 실수 RGBA. 단순히 글자 색만 다른 경우(배경 박스 없음)는 생략할 것",
                 },
               },
               required: ["text", "color"],
@@ -124,7 +151,7 @@ const MATERIAL_SPEC_SCHEMA = {
     },
     logoPlacement: {
       type: "object",
-      description: `브랜드 로고가 배치되어야 할 위치와 크기. ${OUTPUT_SIZE}x${OUTPUT_SIZE} 출력 캔버스 기준 픽셀 좌표`,
+      description: `브랜드 로고가 배치되어야 할 위치와 크기. ${outputWidth}x${outputHeight} 출력 캔버스 기준 픽셀 좌표`,
       properties: {
         x: { type: "integer" },
         y: { type: "integer" },
@@ -135,7 +162,7 @@ const MATERIAL_SPEC_SCHEMA = {
     },
     liveBadgePlacement: {
       type: "object",
-      description: `LIVE 뱃지(빨간 사각형 + LIVE 텍스트)가 시안에 보이면, 그 위치와 크기. ${OUTPUT_SIZE}x${OUTPUT_SIZE} 출력 캔버스 기준 픽셀 좌표. 안 보이면 생략`,
+      description: `LIVE 뱃지(빨간 사각형 + LIVE 텍스트)가 시안에 보이면, 그 위치와 크기. ${outputWidth}x${outputHeight} 출력 캔버스 기준 픽셀 좌표. 안 보이면 생략`,
       properties: {
         x: { type: "integer" },
         y: { type: "integer" },
@@ -146,7 +173,7 @@ const MATERIAL_SPEC_SCHEMA = {
     },
     badgePlacement: {
       type: "object",
-      description: `캡슐형(알약 모양, 완전히 둥근 모서리) 프로모션 뱃지(예: 할인율/이벤트명이 검정 배경+흰 텍스트로 들어간 뱃지)가 시안에 보이면, 그 위치와 크기. 별도 PNG 파일을 그대로 사용하므로 위치/크기만 산출. ${OUTPUT_SIZE}x${OUTPUT_SIZE} 출력 캔버스 기준 픽셀 좌표. 안 보이면 생략`,
+      description: `캡슐형(알약 모양, 완전히 둥근 모서리) 프로모션 뱃지(예: 할인율/이벤트명이 검정 배경+흰 텍스트로 들어간 뱃지)가 시안에 보이면, 그 위치와 크기. 별도 PNG 파일을 그대로 사용하므로 위치/크기만 산출. ${outputWidth}x${outputHeight} 출력 캔버스 기준 픽셀 좌표. 안 보이면 생략`,
       properties: {
         x: { type: "integer" },
         y: { type: "integer" },
@@ -157,7 +184,8 @@ const MATERIAL_SPEC_SCHEMA = {
     },
   },
   required: ["cropRect", "texts"],
-};
+  };
+}
 
 function detectMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -185,7 +213,7 @@ async function loadImagePart(filePath) {
   };
 }
 
-async function analyze(originalPath, referencePath, category, referenceLibraryDir) {
+async function analyze(originalPath, referencePath, category, referenceLibraryDir, outputWidth, outputHeight) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.");
@@ -204,6 +232,14 @@ async function analyze(originalPath, referencePath, category, referenceLibraryDi
   const { GoogleGenAI } = await import("@google/genai");
   const ai = new GoogleGenAI({ apiKey });
 
+  // RULES.md의 공통 규칙에는 "기본 출력 사이즈는 1080x1080"이라고 적혀 있는데, 이번 실행이 그 기본값과
+  // 다른 크기(가로형/세로형 등)를 요청한 경우 그 문구와 실제 목표 크기가 충돌한다. 이 경우에만 규칙
+  // 텍스트 뒤에 이번 실행의 실제 크기를 우선하라는 안내를 덧붙인다.
+  const sizeOverrideNote =
+    outputWidth !== OUTPUT_SIZE || outputHeight !== OUTPUT_SIZE
+      ? `\n\n⚠️ 이번 소재는 예외적으로 기본값(정사각형 ${OUTPUT_SIZE}x${OUTPUT_SIZE})이 아니라 ${outputWidth}x${outputHeight}px 프레임으로 제작합니다. 위 "기본 출력 사이즈" 규칙 대신 이 크기를 기준으로 cropRect/texts/logoPlacement 등 모든 좌표를 산출하세요.`
+      : "";
+
   const response = await ai.models.generateContent({
     model: MODEL,
     contents: [
@@ -212,11 +248,11 @@ async function analyze(originalPath, referencePath, category, referenceLibraryDi
       `[원본 이미지] 크롭되지 않은 고해상도 원본 사진입니다. 실제 크기는 ${original.width}x${original.height}px 입니다.`,
       { inlineData: { mimeType: original.mimeType, data: original.base64 } },
       `위 두 이미지를 비교해서 아래 스키마에 맞는 JSON을 추출하세요.
-${getProductionRules(resolvedCategory)}`,
+${getProductionRules(resolvedCategory)}${sizeOverrideNote}`,
     ],
     config: {
       responseMimeType: "application/json",
-      responseSchema: MATERIAL_SPEC_SCHEMA,
+      responseSchema: buildMaterialSpecSchema(outputWidth, outputHeight),
       maxOutputTokens: 16384,
       thinkingConfig: { thinkingBudget: 2048 },
     },
@@ -253,6 +289,10 @@ function normalizeSpecColors(spec) {
   for (const t of spec.texts || []) {
     if (t.color) t.color = normalizeColor(t.color);
     if (t.backdrop && t.backdrop.color) t.backdrop.color = normalizeColor(t.backdrop.color);
+    for (const h of t.highlights || []) {
+      if (h.color) h.color = normalizeColor(h.color);
+      if (h.background) h.background = normalizeColor(h.background);
+    }
   }
 }
 
@@ -262,31 +302,78 @@ function rectsOverlap(a, b) {
   return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
-function clampCropRect(rect, imageWidth, imageHeight) {
-  const size = Math.max(1, Math.min(rect.width, rect.height, imageWidth, imageHeight));
-  const x = Math.max(0, Math.min(rect.x, imageWidth - size));
-  const y = Math.max(0, Math.min(rect.y, imageHeight - size));
-  return { x, y, size };
+// rect를 outputWidth:outputHeight 비율에 맞춰 이미지 경계 안으로 잘라낸다. 정사각형(1:1)일 때는
+// 기존 동작(rect/이미지 중 가장 작은 변 기준 정사각형)과 동일하게 동작한다.
+function clampCropRect(rect, imageWidth, imageHeight, outputWidth, outputHeight) {
+  const targetAspect = outputWidth / outputHeight;
+  let w = Math.max(1, Math.min(rect.width, imageWidth));
+  let h = Math.max(1, Math.min(rect.height, imageHeight));
+
+  if (w / h > targetAspect) {
+    w = h * targetAspect;
+  } else {
+    h = w / targetAspect;
+  }
+  if (w > imageWidth) {
+    w = imageWidth;
+    h = w / targetAspect;
+  }
+  if (h > imageHeight) {
+    h = imageHeight;
+    w = h * targetAspect;
+  }
+  w = Math.max(1, Math.round(w));
+  h = Math.max(1, Math.round(h));
+
+  const x = Math.max(0, Math.min(Math.round(rect.x), imageWidth - w));
+  const y = Math.max(0, Math.min(Math.round(rect.y), imageHeight - h));
+  return { x, y, width: w, height: h };
 }
 
-async function cropAndResizeOriginal(original, cropRect) {
-  const { x, y, size } = clampCropRect(cropRect, original.width, original.height);
+async function cropAndResizeOriginal(original, cropRect, outputWidth, outputHeight) {
+  const { x, y, width, height } = clampCropRect(cropRect, original.width, original.height, outputWidth, outputHeight);
   const buffer = await sharp(original.buffer)
-    .extract({ left: x, top: y, width: size, height: size })
-    .resize(OUTPUT_SIZE, OUTPUT_SIZE, { fit: "cover" })
+    .extract({ left: x, top: y, width, height })
+    .resize(outputWidth, outputHeight, { fit: "cover" })
     .png()
     .toBuffer();
   return buffer.toString("base64");
 }
 
-async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, frameName, category, badgePath, referenceLibraryDir) {
-  const { spec, original } = await analyze(originalPath, referencePath, category, referenceLibraryDir);
+// outputWidth/outputHeight를 명시하지 않으면 brand.config.json의 기본 정사각형 크기(OUTPUT_SIZE)를 쓴다.
+function resolveOutputDims({ outputWidth, outputHeight, outputSize } = {}) {
+  if (outputWidth && outputHeight) {
+    return { width: Number(outputWidth), height: Number(outputHeight) };
+  }
+  if (outputSize) {
+    const m = String(outputSize).match(/^(\d+)\s*[x×X]\s*(\d+)$/);
+    if (!m) throw new Error(`outputSize 형식이 올바르지 않습니다: "${outputSize}" (예: "1200x675")`);
+    return { width: Number(m[1]), height: Number(m[2]) };
+  }
+  return { width: OUTPUT_SIZE, height: OUTPUT_SIZE };
+}
 
-  const croppedBase64 = await cropAndResizeOriginal(original, spec.cropRect);
+async function buildMaterialSpec({
+  originalPath,
+  referencePath,
+  logoPath,
+  liveBadgePath,
+  frameName,
+  category,
+  badgePath,
+  referenceLibraryDir,
+  outputWidth,
+  outputHeight,
+  outputSize,
+}) {
+  const dims = resolveOutputDims({ outputWidth, outputHeight, outputSize });
+  const { spec, original } = await analyze(originalPath, referencePath, category, referenceLibraryDir, dims.width, dims.height);
+
+  const croppedBase64 = await cropAndResizeOriginal(original, spec.cropRect, dims.width, dims.height);
 
   const result = {
-    frame: { name: frameName || path.basename(originalPath), width: OUTPUT_SIZE, height: OUTPUT_SIZE },
-    mainImage: { x: 0, y: 0, width: OUTPUT_SIZE, height: OUTPUT_SIZE, base64: croppedBase64 },
+    frame: { name: frameName || path.basename(originalPath), width: dims.width, height: dims.height },
+    mainImage: { x: 0, y: 0, width: dims.width, height: dims.height, base64: croppedBase64 },
     texts: spec.texts,
   };
 
@@ -328,9 +415,32 @@ async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadg
   return result;
 }
 
-async function runSingle({ originalPath, referencePath, logoPath, liveBadgePath, outPath, category, badgePath, referenceLibraryDir }) {
+async function runSingle({
+  originalPath,
+  referencePath,
+  logoPath,
+  liveBadgePath,
+  outPath,
+  category,
+  badgePath,
+  referenceLibraryDir,
+  outputWidth,
+  outputHeight,
+  outputSize,
+}) {
   const resolvedOutPath = outPath || path.join(__dirname, "output-spec.json");
-  const spec = await buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, undefined, category, badgePath, referenceLibraryDir);
+  const spec = await buildMaterialSpec({
+    originalPath,
+    referencePath,
+    logoPath,
+    liveBadgePath,
+    category,
+    badgePath,
+    referenceLibraryDir,
+    outputWidth,
+    outputHeight,
+    outputSize,
+  });
   fs.writeFileSync(resolvedOutPath, JSON.stringify(spec, null, 2), "utf-8");
   console.log(`스펙 생성 완료: ${resolvedOutPath}`);
 }
@@ -382,7 +492,19 @@ function buildNumberMap(filePaths, label) {
 
 // 원본이미지 폴더와 시안 폴더를 파일명 번호로 짝지어서, 매칭된 쌍마다 순서대로 analyze.js를 실행한다.
 // Gemini API 레이트리밋(429) 이력이 있어 병렬이 아니라 순차 실행한다.
-async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir }) {
+async function runBatch({
+  originalsDir,
+  referencesDir,
+  logoPath,
+  liveBadgePath,
+  badgePath,
+  category,
+  outDir,
+  referenceLibraryDir,
+  outputWidth,
+  outputHeight,
+  outputSize,
+}) {
   const originalMap = buildNumberMap(listImageFiles(originalsDir), "원본이미지 폴더");
   const referenceMap = buildNumberMap(listImageFiles(referencesDir), "시안 폴더");
 
@@ -415,16 +537,19 @@ async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, 
         `(원본: ${path.basename(originalPath)}, 시안: ${path.basename(referencePath)})`,
     );
     try {
-      const spec = await buildMaterialSpec(
+      const spec = await buildMaterialSpec({
         originalPath,
         referencePath,
         logoPath,
         liveBadgePath,
-        `${num}. ${path.basename(originalPath, path.extname(originalPath))}`,
+        frameName: `${num}. ${path.basename(originalPath, path.extname(originalPath))}`,
         category,
         badgePath,
         referenceLibraryDir,
-      );
+        outputWidth,
+        outputHeight,
+        outputSize,
+      });
       const outPath = path.join(outDir, `output-spec-${num}.json`);
       fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
       succeeded.push({ num, outPath });
@@ -655,7 +780,19 @@ async function extractPptImages(pptxPath) {
 // (PPT면 이미지 추출 후 어떤 게 완성된 시안인지 AI로 판별) 원본이미지 폴더 전체와 비교해서 내용으로
 // 자동 매칭한 뒤, 매칭된 쌍마다 순서대로 소재를 만든다. 파일명 번호가 필요 없는 대신 AI 판단에 의존하므로
 // 결과(어떤 원본이 매칭됐는지)를 콘솔에 남겨 검증할 수 있게 한다.
-async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir }) {
+async function runMatchMode({
+  inputPath,
+  originalsDir,
+  logoPath,
+  liveBadgePath,
+  badgePath,
+  category,
+  outDir,
+  referenceLibraryDir,
+  outputWidth,
+  outputHeight,
+  outputSize,
+}) {
   const resolvedInput = resolveActualPath(inputPath);
   const ext = path.extname(resolvedInput).toLowerCase();
 
@@ -696,16 +833,19 @@ async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, 
         continue;
       }
       console.log(`  -> 매칭: ${path.basename(matchedOriginal)}, 소재 제작 중...`);
-      const spec = await buildMaterialSpec(
-        matchedOriginal,
-        sianPath,
+      const spec = await buildMaterialSpec({
+        originalPath: matchedOriginal,
+        referencePath: sianPath,
         logoPath,
         liveBadgePath,
-        `${i + 1}. ${path.basename(matchedOriginal, path.extname(matchedOriginal))}`,
+        frameName: `${i + 1}. ${path.basename(matchedOriginal, path.extname(matchedOriginal))}`,
         category,
         badgePath,
         referenceLibraryDir,
-      );
+        outputWidth,
+        outputHeight,
+        outputSize,
+      });
       const outPath = path.join(outDir, `output-spec-${i + 1}.json`);
       fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
       succeeded.push({ sianPath, matchedOriginal, outPath });
@@ -764,6 +904,9 @@ async function main() {
       category: parsed.category,
       badgePath: parsed.badgePath,
       referenceLibraryDir: parsed.referenceLibraryDir,
+      outputWidth: parsed.outputWidth,
+      outputHeight: parsed.outputHeight,
+      outputSize: parsed.outputSize,
     });
     return;
   }
@@ -813,7 +956,9 @@ async function main() {
         "     또는: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
         "카테고리(선택): 네이버기획전 | 29cm기획전 | 제품인지 | 별도기획전 (생략 시 공통 규칙만 적용)\n" +
         "레퍼런스라이브러리폴더(선택): 카테고리별 하위 폴더를 담은 폴더 경로. 카테고리를 생략하고 이 폴더를 넘기면 " +
-        "AI가 시안을 보고 카테고리를 자동 판별함 (카테고리를 명시하면 그 값이 항상 우선하고 자동 판별은 건너뜀)",
+        "AI가 시안을 보고 카테고리를 자동 판별함 (카테고리를 명시하면 그 값이 항상 우선하고 자동 판별은 건너뜀)\n" +
+        "출력 크기(선택, --args-file 전용): JSON에 outputWidth/outputHeight(숫자) 또는 outputSize(\"1200x675\" 형식 문자열)를 " +
+        "추가하면 기본 정사각형(1080x1080) 대신 그 크기로 소재를 만듦",
     );
     process.exitCode = 1;
     return;
