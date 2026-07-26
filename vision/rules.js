@@ -1,109 +1,111 @@
 // ============================================================
-// 소재 제작 규칙 (알로소 Alloso)
-// 이 파일은 "무엇을 만들지"에 대한 브랜드 규칙만 담는다.
-// "어떻게 만드는지"(API 호출, 이미지 크롭, Figma 렌더링 등)는 analyze.js / code.ts에 있다.
-// 규칙만 바꾸고 싶으면 이 파일과 아래 MATERIAL_SPEC_SCHEMA만 수정하면 된다.
-//
-// 알로소 소재는 4개 카테고리로 나뉜다: 네이버기획전 / 29cm기획전 / 제품인지 / 별도기획전
-// COMMON_RULES는 4개 카테고리 모두에 공통 적용되는 규칙.
-// CATEGORY_RULES는 카테고리별로 다른 부분만 담는다 (레퍼런스 소재를 보고 채워나가는 중).
+// 소재 제작 규칙 로더 (알로소 Alloso)
+// 이 파일은 더 이상 규칙 "텍스트"를 직접 담지 않는다 — 사람이 읽는 규칙 원문은 프로젝트 루트의
+// RULES.md 하나뿐이고, 이 파일은 그걸 읽어서 Gemini 프롬프트용 텍스트로 파싱만 한다.
+// 숫자/경로 값(출력 사이즈 등)은 프로젝트 루트의 brand.config.json에서 읽는다.
+// 규칙 문구를 바꾸고 싶으면 RULES.md를, 값을 바꾸고 싶으면 brand.config.json을 수정하면 된다.
 // ============================================================
 
-const OUTPUT_SIZE = 1080; // 알로소 기본 소재 사이즈 (정사각형)
+const fs = require("fs");
+const path = require("path");
 
-const CATEGORIES = {
-  NAVER: "네이버기획전",
-  CM29: "29cm기획전",
-  PRODUCT_AWARENESS: "제품인지",
-  STANDALONE: "별도기획전",
-};
+const brandConfig = require("../brand.config.json");
+const RULES_MD_PATH = path.join(__dirname, "..", "RULES.md");
 
-// 카테고리별 고유 규칙. 카테고리별 레퍼런스 소재를 전달받으면 여기에 채워넣는다.
-const CATEGORY_RULES = {
-  [CATEGORIES.NAVER]: `
-- 라이브 방송 예고/홍보 목적이 많아 문구에 방송 날짜·시간 정보가 거의 항상 포함됨 (예: "7.18(토) 오전 11시")
-- 날짜·시간 텍스트는 LIVE 뱃지와 같은 줄에 나란히 배치되는 경우가 많음. 이때 두 가지 방식이 있으니 시안을 보고 구분할 것:
-  (1) 문장 중간에 "LIVE"라는 단어로 자연스럽게 들어가 있으면 texts의 content에 "LIVE" 글자를 포함 (인라인 자동 치환)
-  (2) 문장과 분리된 별도의 독립 뱃지(예: 날짜 텍스트 바로 옆에 붙은 뱃지)로 보이면 liveBadgePlacement로 처리
-- 메인 타이틀(혜택/이벤트 문구, bold) + 서브텍스트(상세 설명 또는 날짜·시간 안내, regular)의 2단 텍스트 구조가 일반적
-- 배경은 실제 라이프스타일 인테리어 사진(거실, 야외 정원 등)을 풀블리드로 사용, 텍스트는 흰색 위주로 사진 위에 직접 배치
-- 실사용자 후기/UGC 사진을 활용한 시안에는 "@계정명" 형태의 작은 크레딧 텍스트가 하단에 별도로 붙기도 함 — 시안에 보이면 별도 text 요소로 포함할 것
-- 로고는 하단 중앙 배치가 일반적이나, 시안에 보이는 실제 위치를 우선할 것`,
-  [CATEGORIES.CM29]: `
-- 텍스트는 흰색이 아니라 검정(다크) 컬러가 기본. 네이버기획전과 반대이니 혼동하지 말 것
-- 로고는 "Alloso" 단독이 아니라 "Alloso X 29CM" 공동 브랜딩 마크이며, 보통 우상단 또는 좌상단에 작게 배치됨
-- 할인율을 "29%"로 맞춘 문구가 자주 등장 (29CM 숫자에 맞춘 것). 검정 배경+흰 텍스트의 완전히 둥근 캡슐(pill) 모양 프로모션 뱃지(예: "~29% + COUPON", "~29% + GIFT", "브랜드데이")로 강조되는 경우가 많음 — 이 뱃지가 시안에 보이면 badgePlacement로 위치/크기만 산출할 것 (텍스트나 배경을 직접 만들지 않음)
-- LIVE 방송 예고 요소(날짜·시간, LIVE 뱃지)는 이 카테고리에는 없음 — 할인/이벤트 홍보가 목적
-- 메인 타이틀(제품명 또는 캠페인명, bold) + 서브텍스트(할인/이벤트 설명, regular)의 2단 구조가 기본이며, 프로모션 뱃지가 있으면 3단째로 추가됨
-- 실사용자 후기/UGC 사진을 활용한 시안에는 "@계정명" 형태의 작은 크레딧 텍스트가 하단에 별도로 붙기도 함 — 네이버기획전과 동일한 패턴
-- 텍스트가 검정색 기본이다 보니, 밝은 벽/창문/블라인드처럼 단조롭고 밝은 배경 위에서도 가독성 보정용 backdrop이 자주 쓰임. 이 경우 backdrop 색은 배경의 어두운 영역이 아니라 텍스트와 대비되는 흰색 계열로 판단할 것. 각도가 대각(예: 27도)인 경우가 특히 이 카테고리에 많으니 시안을 잘 보고 판단할 것`,
-  [CATEGORIES.PRODUCT_AWARENESS]: `
-- 이 카테고리는 한 장짜리 소재가 아니라 여러 장으로 구성된 슬라이드 세트다. 슬라이드 순서에 따라 스타일이 달라지니, 지금 작업 중인 시안이 표지(1번 슬라이드)인지 이후 슬라이드인지 먼저 확인할 것:
-  (1) 표지(1번 슬라이드) = 히어로 타이포형: 서브카피(2줄, 작은 텍스트) + 제품명(영문, 매우 큰 사이즈로 캔버스 폭을 거의 채울 정도) + 하단 중앙의 "Alloso" 텍스트로 구성. 제품명 fontSize는 [텍스트] 섹션의 "68px 이내 권장" 가이드를 넘어설 수 있음 — 이 슬라이드는 제품명이 소재의 주인공이므로 시안 비율 그대로 크게 판단할 것. "Alloso"는 고정 화이트 로고 PNG(logoPlacement)를 쓰지 말고 일반 text 요소로 만들 것 — 색상은 그 소재의 서브카피/제품명과 같은 액센트 컬러로 지정(디자인마다 다름 — 오렌지, 브라운 등)
-  (2) 표지 이후 슬라이드 = 미니멀 태그형: 마케팅 카피 없이 "●제품명" 또는 "●컬러명" 형태의 작은 텍스트 하나만 제품 옆에 배치. "●" 기호를 텍스트 앞에 그대로 포함할 것(예: "● Iceblue"). 텍스트 색은 흰색/검정 고정이 아니라 그 제품·컬러 자체에 어울리는 색으로 판단(예: 아이스블루 소파 옆에는 옅은 하늘색 텍스트). 로고, 서브카피 없음. 같은 제품의 여러 컬러/디테일 컷을 슬라이드별로 한 장씩 반복 제작하는 구조
-- 로고 PNG(logoPlacement)는 이 카테고리 어디에도 등장하지 않음 — 화이트 로고 PNG를 써야 하는 시안이 명확히 보이는 경우가 아니면 생략할 것
-- (참고) 이 카테고리는 정사각형과 함께 세로형(스토리) 버전도 같이 제작되지만, 현재 파이프라인은 정사각형만 지원함 — 세로형은 나중에 필요할 때 추가 예정
-- 슬라이드 세트이므로, 시안을 여러 장 전달받으면 각 장을 별도 analyze.js 실행으로 처리해서 슬라이드마다 별도 프레임을 만들 것 (한 프레임에 몰아넣지 않음)`,
-  [CATEGORIES.STANDALONE]: ``,
-};
+const OUTPUT_SIZE = brandConfig.outputSize;
 
-const COMMON_RULES = `
-알로소(Alloso) 소재 제작 규칙:
+const COMMON_START_MARKER = "<!-- RULES_JS:COMMON_RULES:START -->";
+const COMMON_END_MARKER = "<!-- RULES_JS:COMMON_RULES:END -->";
+const CATEGORY_START_MARKER = "<!-- RULES_JS:CATEGORY_RULES:START -->";
+const CATEGORY_END_MARKER = "<!-- RULES_JS:CATEGORY_RULES:END -->";
 
-[기본 사이즈]
-- 모든 소재의 기본 출력 사이즈는 ${OUTPUT_SIZE}x${OUTPUT_SIZE}px (정사각형)
+// RULES.md의 각 규칙 항목에 달린 "- 수정 위치: ..." 불릿은 사람(유지보수자)을 위한 메타 정보일 뿐 —
+// 브랜드 규칙 자체가 아니므로 Gemini 프롬프트에는 불필요한 노이즈다(파일/변수명을 언급해 혼동을 줄 수도
+// 있음). 이 불릿과 그 아래 들여쓰기된 하위 항목/이어지는 줄만 기계적으로 제거하고, RULES.md 파일 자체는
+// 사람이 보는 그대로 손대지 않는다.
+function stripMaintenanceNotes(text) {
+  const lines = text.split("\n");
+  const kept = [];
+  let skipping = false;
 
-[폰트]
-- 국문은 Pretendard, 영문은 Century Gothic으로 자동 분기되므로 fontWeight만 판단하면 됨(폰트 패밀리는 렌더링 단계에서 문자 단위로 자동 처리, 숫자는 Pretendard 그룹으로 처리됨)
-- 메인 타이틀은 bold, 서브 텍스트는 regular로 판단. 얇은(regular) 텍스트는 시안에서도 가늘고 심플한 인상이어야 함
+  for (const line of lines) {
+    if (skipping) {
+      const isBlank = line.trim() === "";
+      if (isBlank) {
+        skipping = false;
+        kept.push(line);
+        continue;
+      }
+      if (/^\s/.test(line)) {
+        // 수정 위치 불릿에 딸린 하위 항목/줄바꿈된 이어지는 줄 — 계속 건너뜀
+        continue;
+      }
+      skipping = false;
+      // 들여쓰기 없는 새 줄이 시작됨 — 아래에서 정상적으로 재평가
+    }
+    if (/^-\s*수정\s*위치/.test(line.trim())) {
+      skipping = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
 
-[텍스트]
-- 메인 타이틀 fontSize는 68px 이내 권장(고정값 아님, 시안 비율 보고 판단)
-- 서브타이틀 fontSize는 메인 타이틀의 약 60%
-- align은 시안에 보이는 정렬(좌/중앙/우)을 그대로 따를 것
-- 문장 중간에 "LIVE" 단어가 보이면 content에 "LIVE"라는 글자를 그대로 포함해서 적을 것 (렌더링 시 자동으로 로고 이미지로 치환됨, highlights로 색만 바꾸지 말 것)
-- 기본은 한 텍스트 요소 안에서 색을 통일하는 것 — highlights는 시안에서 실제로 또렷하게 다른 색으로 보이는
-  단어가 있을 때만 기재할 것. 조금이라도 애매하면(예: 미묘한 명도 차이, 그림자로 인한 착시) highlights를
-  생략하고 전체를 하나의 색으로 처리할 것 (특히 날짜·시간 안내 문구는 앞뒤 문장과 같은 색인 경우가 대부분)
+function extractBetween(text, startMarker, endMarker, label) {
+  const startIdx = text.indexOf(startMarker);
+  const endIdx = text.indexOf(endMarker);
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+    throw new Error(
+      `RULES.md에서 ${label} 마커(${startMarker} ~ ${endMarker})를 찾지 못했습니다. RULES.md 구조가 바뀌었는지 확인할 것.`,
+    );
+  }
+  return text.slice(startIdx + startMarker.length, endIdx);
+}
 
-[이미지 크롭]
-- 시안 이미지는 이미 완성된 레이아웃 레퍼런스이고, 원본 이미지는 크롭되지 않은 고해상도 사진이다
-- 최우선 기준은 "제품(소파/의자 등)이 잘리지 않고 프레임 안에 안정적으로 들어오는 것". 제품 전체가 보이면서, 제품 주변 여백이 좌우/상하로 균형 있게 남도록(제품이 중앙에 오도록) cropRect를 산출할 것
-- 시안의 구도(줌 정도, 인물/소품 포함 여부, 여백 느낌)는 참고용으로만 쓸 것 — 원본이 시안보다 훨씬 넓은 화각이라 시안과 똑같은 구도를 억지로 재현하려 하면 오히려 제품이 한쪽으로 쏠리거나 잘릴 수 있음. 시안 구도와 "제품이 안 잘리고 중앙에 오는 것"이 충돌하면 후자를 우선할 것
-- 원본에서 시안 속 피사체와 동일한 피사체를 먼저 찾은 뒤, 그 피사체를 중심으로 정사각형 영역을 잡을 것
+// "### 카테고리명" 소제목 기준으로 텍스트를 분리한다 (다음 "### " 소제목 또는 구간 끝까지).
+function splitByCategoryHeadings(sectionText) {
+  const headingRegex = /^###\s+(.+)$/gm;
+  const matches = [...sectionText.matchAll(headingRegex)];
+  const categoryRules = {};
+  for (let i = 0; i < matches.length; i++) {
+    const name = matches[i][1].trim();
+    const contentStart = matches[i].index + matches[i][0].length;
+    const contentEnd = i + 1 < matches.length ? matches[i + 1].index : sectionText.length;
+    categoryRules[name] = sectionText.slice(contentStart, contentEnd).trim();
+  }
+  return categoryRules;
+}
 
-[로고]
-- 로고는 별도 PNG 파일을 그대로 사용하므로, logoPlacement에는 로고가 들어갈 위치/크기만 기재한다 (로고 이미지 자체를 만들거나 크롭하지 않음)
+function parseRulesMd() {
+  const text = fs.readFileSync(RULES_MD_PATH, "utf-8");
 
-[LIVE 뱃지]
-- 빨간 사각형 배경에 흰색 "LIVE" 글자가 있는 뱃지는 별도 PNG 파일을 그대로 사용하므로, liveBadgePlacement에는 위치/크기만 기재한다 (텍스트나 배경을 직접 만들지 않음)
-- 시안에 LIVE 뱃지가 없으면 liveBadgePlacement는 생략
+  const commonSection = extractBetween(text, COMMON_START_MARKER, COMMON_END_MARKER, "공통 규칙(COMMON_RULES)");
+  const commonRules = stripMaintenanceNotes(commonSection).replace(/\n{3,}/g, "\n\n").trim();
 
-[프로모션 뱃지]
-- 완전히 둥근 모서리(캡슐/알약 모양)에 할인율·이벤트명 등이 들어간 뱃지(로고/LIVE 뱃지와 마찬가지로 텍스트가 이미 포함된 완성본 이미지)는 별도 PNG 파일을 그대로 사용하므로, badgePlacement에는 위치/크기만 기재한다 (텍스트나 배경을 직접 만들지 않음)
-- 시안에 이런 캡슐형 뱃지가 없으면 badgePlacement는 생략
+  const categorySection = extractBetween(text, CATEGORY_START_MARKER, CATEGORY_END_MARKER, "카테고리별 규칙(CATEGORY_RULES)");
+  const categoryRules = splitByCategoryHeadings(categorySection);
 
-[가독성 처리 - backdrop]
-- 텍스트가 배경 이미지 위에 있어 가독성이 떨어질 것으로 보이면 backdrop 필드를 채울 것 (배경이 사진이라 지저분한 경우뿐 아니라, 흰 벽처럼 단조로운 배경이라도 시안에 그라데이션 패널이 보이면 채울 것)
-- type은 "gradient" (텍스트 뒤에 깔리는 그라데이션 패널) 또는 "blur" (블러 처리된 패널) 중 시안에 더 가까운 방식으로 판단
-- backdrop.color를 정하는 기준은 둘 중 시안에 가까운 쪽으로 판단할 것:
-  (1) 텍스트 주변 배경 이미지의 어두운 영역(벽지, 그림자 진 부분 등) 색상에서 추출한 값 (임의의 검정색 사용 금지)
-  (2) 텍스트 색과 대비되는 색 — 텍스트가 흰색이면 backdrop은 검정 계열, 텍스트가 검정색이면 backdrop은 흰색 계열
-- gradient 타입의 angle(진행 방향)은 시안을 보고 그대로 판단할 것 — 수직(위/아래 방향)일 수도, 대각(예: 27도)일 수도 있음. 생략하면 기본값(270, 수직)
-- gradient가 처음부터 서서히 페이드되지 않고 일정 구간까지 solid로 유지되다가 그 뒤로 페이드되는 것처럼 보이면 stops로 그 구간을 지정할 것 (예: 45%까지 solid, 92%까지 페이드)
-- 텍스트가 이미 단색/그라데이션 배경 위에 있어 가독성 문제가 없으면 backdrop 생략
+  return { commonRules, categoryRules };
+}
 
-[톤앤무드]
-- 깔끔하고 절제된 톤, 텍스트+이미지 위주 구성, 그리드형 정렬 선호, 과한 장식 지양 — 이 톤에서 벗어나는 과도한 크기/색상 판단은 피할 것
-`;
+const { commonRules: COMMON_RULES, categoryRules: CATEGORY_RULES } = parseRulesMd();
+
+// RULES.md의 "카테고리별 규칙" 소제목에서 그대로 파생됨 — 하드코딩된 목록이 아니므로 RULES.md에 소제목을
+// 추가/삭제하면 다음 실행부터 자동으로 반영된다. (참고: 이전에는 영문 키(NAVER, CM29 등)를 가진 객체
+// 맵이었으나, 그 키를 참조하는 코드가 없어 카테고리명 배열로 단순화함.)
+const CATEGORIES = Object.keys(CATEGORY_RULES);
 
 // 카테고리를 지정하면 공통 규칙 + 해당 카테고리 규칙을 합쳐서 반환한다.
 // 카테고리를 지정하지 않으면 공통 규칙만 반환한다 (하위 호환).
+// CATEGORY_RULES에 등록되지 않은 카테고리(자동 판별로 완전히 새로운 유형이 나온 경우 등)는
+// 에러 대신 공통 규칙만으로 fallback한다 — 새 기획전 유형이 와도 파이프라인이 멈추지 않게 하기 위함.
 function getProductionRules(category) {
   if (!category) return COMMON_RULES;
   const categoryRules = CATEGORY_RULES[category];
   if (categoryRules === undefined) {
-    throw new Error(`알 수 없는 카테고리: "${category}". CATEGORIES(${Object.values(CATEGORIES).join(", ")}) 중 하나여야 함.`);
+    console.warn(`등록되지 않은 카테고리("${category}")입니다. 공통 규칙만 적용합니다.`);
+    return COMMON_RULES;
   }
   if (!categoryRules.trim()) return COMMON_RULES;
   return `${COMMON_RULES}\n[카테고리: ${category}]\n${categoryRules}`;

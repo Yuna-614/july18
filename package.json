@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "watch": "tsc -p tsconfig.json --watch",
+    "build": "node scripts/sync-brand-config.js && tsc -p tsconfig.json",
+    "watch": "node scripts/sync-brand-config.js && tsc -p tsconfig.json --watch",
     "analyze": "node vision/analyze.js"
   },
   "devDependencies": {

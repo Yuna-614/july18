@@ -185,10 +185,17 @@ async function loadImagePart(filePath) {
   };
 }
 
-async function analyze(originalPath, referencePath, category) {
+async function analyze(originalPath, referencePath, category, referenceLibraryDir) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY 환경변수가 설정되어 있지 않습니다.");
+  }
+
+  // category가 사람이 명시한 값이면 항상 그 값을 우선하고, 명시되지 않았고 레퍼런스 라이브러리가
+  // 있으면 classifyCategory로 자동 판별한다 (새로운 기획전 유형이 와도 사람이 카테고리를 몰라도 됨).
+  let resolvedCategory = category;
+  if (!resolvedCategory && referenceLibraryDir) {
+    resolvedCategory = await classifyCategory(referencePath, referenceLibraryDir);
   }
 
   const original = await loadImagePart(originalPath);
@@ -205,7 +212,7 @@ async function analyze(originalPath, referencePath, category) {
       `[원본 이미지] 크롭되지 않은 고해상도 원본 사진입니다. 실제 크기는 ${original.width}x${original.height}px 입니다.`,
       { inlineData: { mimeType: original.mimeType, data: original.base64 } },
       `위 두 이미지를 비교해서 아래 스키마에 맞는 JSON을 추출하세요.
-${getProductionRules(category)}`,
+${getProductionRules(resolvedCategory)}`,
     ],
     config: {
       responseMimeType: "application/json",
@@ -272,8 +279,8 @@ async function cropAndResizeOriginal(original, cropRect) {
   return buffer.toString("base64");
 }
 
-async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, frameName, category, badgePath) {
-  const { spec, original } = await analyze(originalPath, referencePath, category);
+async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, frameName, category, badgePath, referenceLibraryDir) {
+  const { spec, original } = await analyze(originalPath, referencePath, category, referenceLibraryDir);
 
   const croppedBase64 = await cropAndResizeOriginal(original, spec.cropRect);
 
@@ -321,9 +328,9 @@ async function buildMaterialSpec(originalPath, referencePath, logoPath, liveBadg
   return result;
 }
 
-async function runSingle({ originalPath, referencePath, logoPath, liveBadgePath, outPath, category, badgePath }) {
+async function runSingle({ originalPath, referencePath, logoPath, liveBadgePath, outPath, category, badgePath, referenceLibraryDir }) {
   const resolvedOutPath = outPath || path.join(__dirname, "output-spec.json");
-  const spec = await buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, undefined, category, badgePath);
+  const spec = await buildMaterialSpec(originalPath, referencePath, logoPath, liveBadgePath, undefined, category, badgePath, referenceLibraryDir);
   fs.writeFileSync(resolvedOutPath, JSON.stringify(spec, null, 2), "utf-8");
   console.log(`스펙 생성 완료: ${resolvedOutPath}`);
 }
@@ -375,7 +382,7 @@ function buildNumberMap(filePaths, label) {
 
 // 원본이미지 폴더와 시안 폴더를 파일명 번호로 짝지어서, 매칭된 쌍마다 순서대로 analyze.js를 실행한다.
 // Gemini API 레이트리밋(429) 이력이 있어 병렬이 아니라 순차 실행한다.
-async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, badgePath, category, outDir }) {
+async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir }) {
   const originalMap = buildNumberMap(listImageFiles(originalsDir), "원본이미지 폴더");
   const referenceMap = buildNumberMap(listImageFiles(referencesDir), "시안 폴더");
 
@@ -416,6 +423,7 @@ async function runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, 
         `${num}. ${path.basename(originalPath, path.extname(originalPath))}`,
         category,
         badgePath,
+        referenceLibraryDir,
       );
       const outPath = path.join(outDir, `output-spec-${num}.json`);
       fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
@@ -541,6 +549,84 @@ async function matchOriginalForSian(sianPath, originalCandidatePaths) {
   return originalCandidatePaths[idx];
 }
 
+// 카테고리 자동 판별용으로 카테고리 폴더 하나당 보여줄 대표 샘플 이미지 개수.
+const CATEGORY_SAMPLE_COUNT = 2;
+
+const CATEGORY_CLASSIFICATION_SCHEMA = {
+  type: "object",
+  properties: {
+    matchedCategory: {
+      type: "string",
+      description:
+        "시안과 레이아웃/스타일(구성 방식, 텍스트 배치, 뱃지 유무 등)이 가장 유사한 카테고리명을 " +
+        "후보 목록에 나온 이름 그대로 반환. 어느 카테고리와도 확실히 유사하지 않으면(완전히 새로운 " +
+        '유형의 소재) 카테고리명 대신 정확히 "NONE"을 반환.',
+    },
+    reasoning: {
+      type: "string",
+      description: "matchedCategory를 그렇게 판단한(또는 NONE으로 판단한) 근거를 한두 문장으로.",
+    },
+  },
+  required: ["matchedCategory", "reasoning"],
+};
+
+// referenceLibraryDir 하위 폴더 이름을 카테고리 후보로 그대로 사용한다(하드코딩된 CATEGORIES 대신
+// 폴더 구조를 읽어서 판단 — 새 카테고리 폴더를 추가하면 자동으로 후보에 포함됨). 각 폴더에서 대표
+// 이미지 몇 장을 뽑아 새 시안과 함께 한 번의 Gemini 호출로 보여주고 가장 유사한 카테고리를 고르게 한다.
+// matchOriginalForSian과 동일하게 확실한 매치가 없으면(스키마상 "NONE") null을 반환 — 완전히 새로운
+// 유형의 소재라는 뜻이며, 이 경우 getProductionRules가 공통 규칙만으로 fallback한다.
+// AI 판단이므로 --match 모드와 동일한 관례로 판별 결과와 근거를 항상 콘솔에 남겨 검증 가능하게 한다.
+async function classifyCategory(sianPath, referenceLibraryDir) {
+  const apiKey = requireApiKey();
+  const { GoogleGenAI } = await import("@google/genai");
+  const ai = new GoogleGenAI({ apiKey });
+
+  const categoryNames = fs
+    .readdirSync(referenceLibraryDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+
+  if (categoryNames.length === 0) {
+    throw new Error(`레퍼런스 라이브러리 폴더에 카테고리 하위 폴더가 없습니다: ${referenceLibraryDir}`);
+  }
+
+  const sianThumb = await loadThumbnailPart(sianPath);
+  const contents = [
+    "[신규 시안] 아래는 카테고리를 판별해야 할 새 광고 시안 이미지다.",
+    { inlineData: { mimeType: sianThumb.mimeType, data: sianThumb.base64 } },
+    `[카테고리 후보 목록] 아래는 기존에 분류된 카테고리 ${categoryNames.length}개와 각 카테고리의 대표 시안 샘플이다. ` +
+      "각 카테고리 앞에 이름을 표시했다.",
+  ];
+  for (const categoryName of categoryNames) {
+    const categoryDir = path.join(referenceLibraryDir, categoryName);
+    const samplePaths = listImageFiles(categoryDir).slice(0, CATEGORY_SAMPLE_COUNT);
+    contents.push(`[카테고리 "${categoryName}"] 샘플 ${samplePaths.length}장`);
+    for (const samplePath of samplePaths) {
+      const thumb = await loadThumbnailPart(samplePath);
+      contents.push({ inlineData: { mimeType: thumb.mimeType, data: thumb.base64 } });
+    }
+  }
+  contents.push(
+    "[신규 시안]이 어떤 카테고리와 레이아웃/스타일(구성 방식, 텍스트 배치, 뱃지 유무 등)이 가장 유사한지 " +
+      "후보 목록의 카테고리명을 그대로 matchedCategory로 답하라. 색상이나 제품 종류가 아니라 소재의 구성 " +
+      '방식을 기준으로 판단할 것. 어느 카테고리와도 확실히 유사하지 않으면 matchedCategory를 "NONE"으로 ' +
+      "답하고, 그 이유를 reasoning에 적을 것.",
+  );
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents,
+    config: { responseMimeType: "application/json", responseSchema: CATEGORY_CLASSIFICATION_SCHEMA, maxOutputTokens: 1536 },
+  });
+  const parsed = JSON.parse(response.text);
+  const matched = categoryNames.includes(parsed.matchedCategory) ? parsed.matchedCategory : null;
+
+  console.log(`카테고리 자동 판별: ${matched ? `"${matched}"` : "NONE (새로운 유형으로 간주, 공통 규칙만 적용)"}`);
+  console.log(`  판단 근거: ${parsed.reasoning || "(근거 없음)"}`);
+
+  return matched;
+}
+
 // PPT(pptx)는 zip 컨테이너이므로 ppt/media/ 안의 이미지 파일들을 그대로 꺼낸다.
 // 슬라이드에 있는 그림을 "렌더링"하는 게 아니라 원본 임베디드 이미지 파일을 그대로 추출하는 방식이라,
 // 텍스트가 네이티브 PPT 도형/글상자로만 있고 사진과 합성되어 있지 않은 슬라이드는 지원하지 않는다
@@ -569,7 +655,7 @@ async function extractPptImages(pptxPath) {
 // (PPT면 이미지 추출 후 어떤 게 완성된 시안인지 AI로 판별) 원본이미지 폴더 전체와 비교해서 내용으로
 // 자동 매칭한 뒤, 매칭된 쌍마다 순서대로 소재를 만든다. 파일명 번호가 필요 없는 대신 AI 판단에 의존하므로
 // 결과(어떤 원본이 매칭됐는지)를 콘솔에 남겨 검증할 수 있게 한다.
-async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir }) {
+async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir }) {
   const resolvedInput = resolveActualPath(inputPath);
   const ext = path.extname(resolvedInput).toLowerCase();
 
@@ -618,6 +704,7 @@ async function runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, 
         `${i + 1}. ${path.basename(matchedOriginal, path.extname(matchedOriginal))}`,
         category,
         badgePath,
+        referenceLibraryDir,
       );
       const outPath = path.join(outDir, `output-spec-${i + 1}.json`);
       fs.writeFileSync(outPath, JSON.stringify(spec, null, 2), "utf-8");
@@ -676,57 +763,62 @@ async function main() {
       outPath: parsed.outPath,
       category: parsed.category,
       badgePath: parsed.badgePath,
+      referenceLibraryDir: parsed.referenceLibraryDir,
     });
     return;
   }
 
   if (process.argv[2] === "--match") {
-    const [inputPath, originalsDir, logoPath, liveBadgePath, outDirArg, category, badgePath] = process.argv.slice(3);
+    const [inputPath, originalsDir, logoPath, liveBadgePath, outDirArg, category, badgePath, referenceLibraryDir] = process.argv.slice(3);
     if (!inputPath || !originalsDir) {
       console.error(
-        "사용법: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
+        "사용법: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
           "     또는: node vision/analyze.js --args-file <json경로> (JSON에 inputPath/originalsDir 지정)\n" +
           "시안이 이미지 파일이면 그 자체를, .pptx면 안의 이미지를 추출해 AI로 시안을 골라낸 뒤, 원본이미지 폴더 전체와 " +
-          "내용을 비교해 자동으로 매칭합니다 (파일명 번호 불필요, AI 판단이므로 결과를 콘솔에서 꼭 확인할 것)",
+          "내용을 비교해 자동으로 매칭합니다 (파일명 번호 불필요, AI 판단이므로 결과를 콘솔에서 꼭 확인할 것)\n" +
+          "카테고리를 생략하고 레퍼런스라이브러리폴더를 넘기면 카테고리를 AI가 자동 판별합니다 (카테고리를 명시하면 그 값이 항상 우선)",
       );
       process.exitCode = 1;
       return;
     }
     const outDir = outDirArg || path.join(__dirname, "output");
-    await runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir });
+    await runMatchMode({ inputPath, originalsDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir });
     return;
   }
 
   if (process.argv[2] === "--batch") {
-    const [originalsDir, referencesDir, logoPath, liveBadgePath, outDirArg, category, badgePath] = process.argv.slice(3);
+    const [originalsDir, referencesDir, logoPath, liveBadgePath, outDirArg, category, badgePath, referenceLibraryDir] = process.argv.slice(3);
     if (!originalsDir || !referencesDir) {
       console.error(
-        "사용법: node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
+        "사용법: node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
           "     또는: node vision/analyze.js --args-file <json경로> (JSON에 originalsDir/referencesDir 지정)\n" +
-          "원본/시안 폴더 안 파일명에 같은 번호가 들어간 파일끼리 자동으로 짝지어 각각 처리합니다 (예: 원본_1.jpg <-> 시안_1.png)",
+          "원본/시안 폴더 안 파일명에 같은 번호가 들어간 파일끼리 자동으로 짝지어 각각 처리합니다 (예: 원본_1.jpg <-> 시안_1.png)\n" +
+          "카테고리를 생략하고 레퍼런스라이브러리폴더를 넘기면 카테고리를 AI가 자동 판별합니다 (카테고리를 명시하면 그 값이 항상 우선)",
       );
       process.exitCode = 1;
       return;
     }
     const outDir = outDirArg || path.join(__dirname, "output");
-    await runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, badgePath, category, outDir });
+    await runBatch({ originalsDir, referencesDir, logoPath, liveBadgePath, badgePath, category, outDir, referenceLibraryDir });
     return;
   }
 
-  const [originalPath, referencePath, logoPath, liveBadgePath, outPathArg, category, badgePath] = process.argv.slice(2);
+  const [originalPath, referencePath, logoPath, liveBadgePath, outPathArg, category, badgePath, referenceLibraryDir] = process.argv.slice(2);
 
   if (!originalPath || !referencePath) {
     console.error(
-      "사용법: node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지PNG경로] [출력경로] [카테고리] [프로모션뱃지PNG경로]\n" +
+      "사용법: node vision/analyze.js <원본이미지경로> <시안이미지경로> [로고PNG경로] [LIVE뱃지PNG경로] [출력경로] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
         "     또는: node vision/analyze.js --args-file <json경로>\n" +
-        "     또는: node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
-        "     또는: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로]\n" +
-        "카테고리(선택): 네이버기획전 | 29cm기획전 | 제품인지 | 별도기획전 (생략 시 공통 규칙만 적용)",
+        "     또는: node vision/analyze.js --batch <원본이미지폴더> <시안폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
+        "     또는: node vision/analyze.js --match <시안 이미지 또는 PPT 경로> <원본이미지폴더> [로고PNG경로] [LIVE뱃지PNG경로] [출력폴더] [카테고리] [프로모션뱃지PNG경로] [레퍼런스라이브러리폴더]\n" +
+        "카테고리(선택): 네이버기획전 | 29cm기획전 | 제품인지 | 별도기획전 (생략 시 공통 규칙만 적용)\n" +
+        "레퍼런스라이브러리폴더(선택): 카테고리별 하위 폴더를 담은 폴더 경로. 카테고리를 생략하고 이 폴더를 넘기면 " +
+        "AI가 시안을 보고 카테고리를 자동 판별함 (카테고리를 명시하면 그 값이 항상 우선하고 자동 판별은 건너뜀)",
     );
     process.exitCode = 1;
     return;
   }
-  await runSingle({ originalPath, referencePath, logoPath, liveBadgePath, outPath: outPathArg, category, badgePath });
+  await runSingle({ originalPath, referencePath, logoPath, liveBadgePath, outPath: outPathArg, category, badgePath, referenceLibraryDir });
 }
 
 main().catch((err) => {

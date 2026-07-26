@@ -1,0 +1,27 @@
+{
+  "brandName": "Alloso",
+  "outputSize": 1080,
+  "font": {
+    "krFamily": "Pretendard",
+    "latinFamily": "Century Gothic",
+    "krLetterSpacingPercent": -1.5,
+    "latinLetterSpacingPercent": -2.5,
+    "fallback": { "family": "Inter", "style": "Regular" }
+  },
+  "liveInlineLogo": {
+    "heightRatio": 1.05,
+    "gapRatio": 0.15
+  },
+  "backdrop": {
+    "defaultBlurRadius": 20
+  },
+  "assets": {
+    "logoPath": "요소/알로소 로고_화이트.png",
+    "liveBadgePath": "요소/LIVE 로.png"
+  },
+  "paths": {
+    "originalsDir": "원본이미지",
+    "referenceLibraryDir": "레퍼런스",
+    "outDir": "output"
+  }
+}

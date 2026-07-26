@@ -21,19 +21,16 @@ const FONT_WEIGHT_MAP = {
     medium: "Medium",
     bold: "Bold",
 };
-// 국문+숫자는 Pretendard, 영문만 Century Gothic
+// === BRAND_CONFIG_START (자동 생성 — 직접 수정 금지, brand.config.json을 고치고 npm run build 실행) ===
 const KR_FAMILY = "Pretendard";
 const LATIN_FAMILY = "Century Gothic";
-// 자간(letter spacing), %
 const KR_LETTER_SPACING_PERCENT = -1.5;
 const LATIN_LETTER_SPACING_PERCENT = -2.5;
-// 브랜드 폰트 로드 실패 시 대체 폰트
 const FALLBACK_FONT = { family: "Inter", style: "Regular" };
-// 텍스트 내 "LIVE" 인라인 로고 치환 시 로고 높이 = fontSize * 이 배율, 로고-텍스트 간 여백 = fontSize * 이 배율
 const LIVE_INLINE_LOGO_HEIGHT_RATIO = 1.05;
 const LIVE_INLINE_LOGO_GAP_RATIO = 0.15;
-// backdrop(가독성 패널) blur 타입의 기본 블러 강도(px)
 const DEFAULT_BACKDROP_BLUR_RADIUS = 20;
+// === BRAND_CONFIG_END ===
 // ============================================================
 // 규칙 블록 끝
 // ============================================================
